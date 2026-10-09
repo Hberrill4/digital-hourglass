@@ -3,8 +3,7 @@
 #include <math.h>
 
 #include <MD_MAX72xx.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <LiquidCrystal_I2C.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_MPU6050.h>
 
@@ -16,16 +15,16 @@
 // - Separate start/pause button
 // - Active buzzer driven through an NPN transistor
 // - GY-87 IMU (MPU6050 accelerometer/gyroscope)
-// - Optional SSD1306 128x64 I2C OLED
+// - 16x2 LCD with I2C backpack (PCF8574, "I2C LCD 1602")
 //
 // Features:
 // - Encoder counted by interrupt (no missed detents during I2C)
 // - MAX7219 manual update mode; one SPI flush per frame
-// - I2C at 400 kHz (held there for the OLED and the IMU)
-// - OLED shows the current mode and what to do next
-// - Self-test at power-up (OLED, IMU, buttons, LED matrix)
+// - I2C at 100 kHz (the LCD backpack chip is rated for 100 kHz)
+// - LCD shows the mode and time, and rotates through instructions
+// - Self-test at power-up (LCD, IMU, buttons, LED matrix)
 // - On-screen messages for user mistakes and hardware faults
-// - IMU and OLED are re-detected automatically if unplugged
+// - IMU and LCD are re-detected automatically if unplugged
 // - Every message is also printed to Serial at 115200 baud
 // ============================================================
 
@@ -54,23 +53,32 @@ MD_MAX72XX matrix(MD_MAX72XX::FC16_HW, MATRIX_CS_PIN, MATRIX_COUNT);
 
 // ---------------- I2C ----------------
 
-constexpr uint32_t I2C_CLOCK_HZ = 400000UL;
+// The PCF8574 chip on the LCD backpack is rated for 100 kHz.
+constexpr uint32_t I2C_CLOCK_HZ = 100000UL;
 
-// ---------------- OLED ----------------
+// ---------------- LCD ----------------
 
-constexpr uint8_t OLED_WIDTH = 128;
-constexpr uint8_t OLED_HEIGHT = 64;
-constexpr int8_t OLED_RESET_PIN = -1;
-constexpr uint8_t OLED_ADDRESSES[2] = {0x3C, 0x3D};
-constexpr uint32_t OLED_REFRESH_MS = 150;
+constexpr uint8_t LCD_COLUMNS = 16;
+constexpr uint8_t LCD_ROWS = 2;
 
-// The last two arguments stop the library dropping the bus back to
-// 100 kHz after every display update.
-Adafruit_SSD1306 oled(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RESET_PIN,
-                      I2C_CLOCK_HZ, I2C_CLOCK_HZ);
+// Most backpacks are 0x27 (PCF8574) or 0x3F (PCF8574A). The rest of
+// each chip's address range is checked too, for modules with the
+// A0-A2 address pads bridged.
+constexpr uint8_t LCD_ADDRESSES[16] = {
+    0x27, 0x3F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25,
+    0x26, 0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E
+};
 
-bool oledAvailable = false;
-uint8_t oledAddress = 0;
+constexpr uint32_t LCD_REFRESH_MS = 200;
+constexpr uint32_t LCD_ROTATE_MS = 2000;       // instruction lines
+constexpr uint32_t NOTICE_ROTATE_MS = 1500;    // notice detail lines
+
+LiquidCrystal_I2C* lcd = nullptr;   // created once the address is known
+bool lcdAvailable = false;
+uint8_t lcdAddress = 0;
+
+// What is currently on each LCD row, so only changes are sent.
+char lcdShown[LCD_ROWS][LCD_COLUMNS + 1];
 
 // ---------------- GY-87 IMU ----------------
 
@@ -106,6 +114,7 @@ constexpr uint32_t DEFAULT_TIME_SECONDS = 60;
 
 constexpr uint32_t SETTING_HOLD_MS = 5000;
 constexpr uint32_t SETTING_TIMEOUT_MS = 30000;
+constexpr uint32_t HOLD_HINT_AFTER_MS = 400;
 constexpr uint32_t DEBOUNCE_MS = 35;
 constexpr uint32_t ENCODER_DEBOUNCE_US = 1500;
 
@@ -114,9 +123,9 @@ constexpr uint32_t ENCODER_DEBOUNCE_US = 1500;
 constexpr uint32_t BUTTON_STUCK_MS = 20000;
 constexpr uint32_t HEALTH_CHECK_MS = 1000;
 constexpr uint32_t RECONNECT_MS = 3000;
-constexpr uint32_t NOTICE_MS = 3000;
-constexpr uint32_t SELF_TEST_OK_MS = 2000;
-constexpr uint32_t SELF_TEST_FAULT_MS = 5000;
+constexpr uint32_t NOTICE_MS = 4000;
+constexpr uint32_t SELF_TEST_ITEM_MS = 1200;
+constexpr uint32_t SELF_TEST_FAULT_EXTRA_MS = 2000;
 
 // ---------------- SHAKE DETECTION ----------------
 
@@ -159,7 +168,7 @@ uint32_t lastEncoderSwitchEdge = 0;
 
 uint32_t lastHealthCheckMs = 0;
 uint32_t lastImuRetryMs = 0;
-uint32_t lastOledRetryMs = 0;
+uint32_t lastLcdRetryMs = 0;
 
 // ---------------- ENCODER STATE ----------------
 
@@ -271,9 +280,11 @@ void updateBeeper() {
 // ON-SCREEN NOTICES
 // ============================================================
 //
-// A notice temporarily replaces the three instruction lines on
-// the OLED. Each one is also printed to Serial, so messages are
-// still visible when no OLED is fitted.
+// A notice takes over the whole LCD for a few seconds:
+//   row 1: the title (lines[0])
+//   row 2: lines[1] and lines[2], alternating
+// Each one is also printed to Serial, so messages are still
+// visible when no LCD is fitted. Every line is 16 characters max.
 
 enum class NoticeId : uint8_t {
     None,
@@ -296,9 +307,9 @@ struct Notice {
 };
 
 Notice notice;
-char imuIdText[22];
+char imuIdText[LCD_COLUMNS + 1];
 
-void updateOLED(bool force = false);
+void updateLCD(bool force = false);
 
 bool noticeActive(uint32_t now) {
     return notice.id != NoticeId::None && now - notice.shownAt < notice.durationMs;
@@ -329,7 +340,7 @@ bool showNotice(NoticeId id, const char* line0, const char* line1,
         Serial.println();
     }
 
-    updateOLED(true);
+    updateLCD(true);
     return isNew;
 }
 
@@ -367,30 +378,43 @@ uint8_t i2cReadRegister(uint8_t address, uint8_t reg) {
 }
 
 // ============================================================
-// OLED CONNECTION
+// LCD CONNECTION
 // ============================================================
 
-bool connectOled() {
-    for (uint8_t address : OLED_ADDRESSES) {
+// Forces every row to be rewritten on the next update.
+void lcdInvalidate() {
+    for (uint8_t row = 0; row < LCD_ROWS; row++) {
+        lcdShown[row][0] = '\x01';
+        lcdShown[row][1] = '\0';
+    }
+}
+
+bool connectLcd() {
+    for (uint8_t address : LCD_ADDRESSES) {
         if (!i2cDevicePresent(address)) {
             continue;
         }
 
-        // periphBegin = false: Wire is already running.
-        if (oled.begin(SSD1306_SWITCHCAPVCC, address, true, false)) {
-            oledAddress = address;
-            oledAvailable = true;
-
-            Serial.print(F("OLED found at 0x"));
-            Serial.println(address, HEX);
-            return true;
+        if (lcd == nullptr) {
+            lcd = new LiquidCrystal_I2C(address, LCD_COLUMNS, LCD_ROWS);
+            lcdAddress = address;
+        } else if (address != lcdAddress) {
+            continue;   // only the first LCD found is used
         }
 
-        Serial.println(F("OLED answered but failed to start (out of RAM?)."));
+        lcd->init();                    // also restarts Wire
+        Wire.setClock(I2C_CLOCK_HZ);
+        lcd->backlight();
+        lcd->clear();
+        lcdInvalidate();
+
+        lcdAvailable = true;
+        Serial.print(F("LCD found at 0x"));
+        Serial.println(address, HEX);
+        return true;
     }
 
-    oledAvailable = false;
-    oledAddress = 0;
+    lcdAvailable = false;
     return false;
 }
 
@@ -447,23 +471,23 @@ void setImuStatus(ImuStatus status, bool announce) {
     switch (status) {
         case ImuStatus::Ok:
             showNotice(NoticeId::ImuConnected,
-                       "IMU connected", "Shake reset is on", nullptr);
+                       "IMU connected", "Shake reset on", nullptr);
             beep(1, 65);
             break;
 
         case ImuStatus::Missing:
             showNotice(NoticeId::ImuLost,
-                       "! IMU disconnected", "Check GY-87 wiring",
-                       "Shake reset is off", NOTICE_MS * 2);
+                       "! IMU lost", "Check GY-87 wire",
+                       "Shake reset off", NOTICE_MS * 2);
             errorBeep();
             break;
 
         case ImuStatus::WrongChip:
-            snprintf(imuIdText, sizeof(imuIdText), "Got ID 0x%02X, not 0x%02X",
+            snprintf(imuIdText, sizeof(imuIdText), "ID 0x%02X not 0x%02X",
                      imuChipId, IMU_EXPECTED_ID);
             showNotice(NoticeId::ImuWrongChip,
                        "! IMU wrong chip", imuIdText,
-                       "Shake reset is off", NOTICE_MS * 2);
+                       "Shake reset off", NOTICE_MS * 2);
             errorBeep();
             break;
     }
@@ -489,19 +513,20 @@ void updateHealth() {
         setImuStatus(connectImu(), true);
     }
 
-    // OLED: the library cannot report write failures, so poll it.
-    if (oledAvailable) {
-        if (!i2cDevicePresent(oledAddress)) {
-            oledAvailable = false;
-            Serial.println(F("[ERROR] OLED disconnected. Check OLED wiring."));
+    // LCD: the library cannot report write failures, so poll it.
+    if (lcdAvailable) {
+        if (!i2cDevicePresent(lcdAddress)) {
+            lcdAvailable = false;
+            Serial.println(F("[ERROR] LCD disconnected. Check LCD wiring."));
             beep(1, 800);
         }
-    } else if (now - lastOledRetryMs >= RECONNECT_MS) {
-        lastOledRetryMs = now;
+    } else if (now - lastLcdRetryMs >= RECONNECT_MS) {
+        lastLcdRetryMs = now;
 
-        if (connectOled()) {
-            Serial.println(F("OLED reconnected."));
-            updateOLED(true);
+        // A reconnected LCD has lost power, so it is fully re-initialised.
+        if (connectLcd()) {
+            Serial.println(F("LCD reconnected."));
+            updateLCD(true);
         }
     }
 }
@@ -564,16 +589,14 @@ void drawAllLeds() {
 }
 
 // ============================================================
-// OLED DISPLAY
+// LCD DISPLAY
 // ============================================================
 //
-// Layout (128 x 64):
-//   y  0-9   highlighted bar: current mode, and FAULT if any
-//   y 12-35  time, large
-//   y 38-63  three lines telling the user what to do next
-
-constexpr uint8_t OLED_LINE_Y[3] = {38, 47, 56};
-constexpr uint32_t HOLD_HINT_AFTER_MS = 400;
+// Normal screen (16 x 2):
+//   row 1: "RUNNING  ! 00:45"  (mode, "!" if a fault is active, time)
+//   row 2: instructions, rotating every 2 s
+//
+// Notices and stuck-button warnings take over both rows.
 
 const char* stateName() {
     switch (timerState) {
@@ -593,36 +616,24 @@ void formatTime(uint32_t seconds, char* buffer, size_t length) {
              static_cast<unsigned long>(seconds % 60));
 }
 
-void printLine(uint8_t line, const __FlashStringHelper* text) {
-    oled.setCursor(0, OLED_LINE_Y[line]);
-    oled.print(text);
-}
+// Writes one row, padded to 16 characters, only if it changed.
+// Avoiding lcd.clear() stops the screen flickering.
+void lcdWriteRow(uint8_t row, const char* text) {
+    char padded[LCD_COLUMNS + 1];
+    snprintf(padded, sizeof(padded), "%-16s", text == nullptr ? "" : text);
 
-void printLine(uint8_t line, const char* text) {
-    if (text == nullptr) {
+    if (strcmp(padded, lcdShown[row]) == 0) {
         return;
     }
 
-    oled.setCursor(0, OLED_LINE_Y[line]);
-    oled.print(text);
+    lcd->setCursor(0, row);
+    lcd->print(padded);
+    strcpy(lcdShown[row], padded);
 }
 
-// Shake resets the timer; without an IMU, holding START does it.
-void printResetHint(uint8_t line) {
-    if (imuAvailable) {
-        printLine(line, F("Shake: reset"));
-    } else {
-        printLine(line, F("Hold START 5s: reset"));
-    }
-}
-
-void printTotalLine(uint8_t line) {
-    char timeText[8];
-    char text[16];
-
-    formatTime(selectedSeconds, timeText, sizeof(timeText));
-    snprintf(text, sizeof(text), "Total: %s", timeText);
-    printLine(line, text);
+// Picks one of `count` lines, changing every `periodMs`.
+uint8_t rotationIndex(uint8_t count, uint32_t periodMs, uint32_t now) {
+    return static_cast<uint8_t>((now / periodMs) % count);
 }
 
 // True while START is being held towards a 5-second hold action.
@@ -632,7 +643,7 @@ bool startHoldInProgress(uint32_t now) {
            now - startPressedAt >= HOLD_HINT_AFTER_MS;
 }
 
-void printHoldCountdown(uint8_t line, uint32_t now) {
+void formatHoldCountdown(char* buffer, size_t length, uint32_t now) {
     uint32_t held = now - startPressedAt;
     uint32_t left = 0;
 
@@ -640,149 +651,136 @@ void printHoldCountdown(uint8_t line, uint32_t now) {
         left = (SETTING_HOLD_MS - held + 999UL) / 1000UL;
     }
 
-    char text[22];
-    snprintf(text, sizeof(text), "Keep holding: %lus",
-             static_cast<unsigned long>(left));
-    printLine(line, text);
+    snprintf(buffer, length, "Keep holding: %lus", static_cast<unsigned long>(left));
 }
 
-void printInstructions(uint32_t now) {
+// Builds the instruction for row 2 of the normal screen.
+void buildInstruction(char* buffer, size_t length, uint32_t now) {
+    // While START is held for a 5 s action, show a steady countdown.
+    bool holdMeansSomething =
+        timerState == TimerState::Ready || timerState == TimerState::Finished ||
+        !imuAvailable;
+
+    if (holdMeansSomething && startHoldInProgress(now)) {
+        formatHoldCountdown(buffer, length, now);
+        return;
+    }
+
+    const char* resetHint = imuAvailable ? "Shake = reset" : "Hold START=reset";
+
+    char totalText[LCD_COLUMNS + 1];
+    char timeText[8];
+    formatTime(selectedSeconds, timeText, sizeof(timeText));
+    snprintf(totalText, sizeof(totalText), "Total %s", timeText);
+
+    const char* lines[3] = {nullptr, nullptr, nullptr};
+
     switch (timerState) {
         case TimerState::Ready:
-            printLine(0, F("START: begin timer"));
-            if (startHoldInProgress(now)) {
-                printHoldCountdown(1, now);
-            } else {
-                printLine(1, F("Hold START 5s: set"));
-            }
-            if (imuAvailable) {
-                printLine(2, F("Shake: reset"));
-            } else {
-                printLine(2, F("Shake: off (no IMU)"));
-            }
+            lines[0] = "START = begin";
+            lines[1] = "Hold START = set";
+            lines[2] = imuAvailable ? "Shake = reset" : "No IMU: no shake";
             break;
 
         case TimerState::Running:
-            printLine(0, F("START: pause"));
-            if (!imuAvailable && startHoldInProgress(now)) {
-                printHoldCountdown(1, now);
-            } else {
-                printResetHint(1);
-            }
-            printTotalLine(2);
+            lines[0] = "START = pause";
+            lines[1] = resetHint;
+            lines[2] = totalText;
             break;
 
         case TimerState::Paused:
-            printLine(0, F("START: resume"));
-            if (!imuAvailable && startHoldInProgress(now)) {
-                printHoldCountdown(1, now);
-            } else {
-                printResetHint(1);
-            }
-            printTotalLine(2);
+            lines[0] = "START = resume";
+            lines[1] = resetHint;
+            lines[2] = totalText;
             break;
 
         case TimerState::Setting:
-            printLine(0, F("Turn knob: +/-10s"));
-            printLine(1, F("Press knob: save"));
-            printLine(2, F("Range 00:10 - 10:00"));
+            lines[0] = "Turn = +/-10s";
+            lines[1] = "Press knob=save";
+            lines[2] = "Range 0:10-10:00";
             break;
 
         case TimerState::Finished:
-            printLine(0, F("TIME'S UP!"));
-            printLine(1, F("START: run again"));
-            if (startHoldInProgress(now)) {
-                printHoldCountdown(2, now);
-            } else {
-                printLine(2, F("Hold START 5s: set"));
-            }
+            lines[0] = "TIME'S UP!";
+            lines[1] = "START = again";
+            lines[2] = "Hold START = set";
             break;
     }
+
+    snprintf(buffer, length, "%s", lines[rotationIndex(3, LCD_ROTATE_MS, now)]);
 }
 
-void updateOLED(bool force) {
-    if (!oledAvailable) {
+void updateLCD(bool force) {
+    if (!lcdAvailable) {
         return;
     }
 
     uint32_t now = millis();
 
-    if (!force && now - lastDisplayUpdateMs < OLED_REFRESH_MS) {
+    if (!force && now - lastDisplayUpdateMs < LCD_REFRESH_MS) {
         return;
     }
 
     lastDisplayUpdateMs = now;
 
-    uint32_t displaySeconds = selectedSeconds;
+    char top[LCD_COLUMNS + 1];
+    char bottom[LCD_COLUMNS + 1];
 
-    if (timerState == TimerState::Running || timerState == TimerState::Paused) {
-        displaySeconds = remainingSeconds;
-    }
-
-    char timeText[8];
-    formatTime(displaySeconds, timeText, sizeof(timeText));
-
-    oled.clearDisplay();
-    oled.setTextWrap(false);
-    oled.setTextSize(1);
-
-    // Mode bar: black text on a white strip.
-    oled.fillRect(0, 0, OLED_WIDTH, 10, SSD1306_WHITE);
-    oled.setTextColor(SSD1306_BLACK);
-    oled.setCursor(2, 1);
-    oled.print(F("MODE: "));
-    oled.print(stateName());
-
-    if (hardwareFaultActive()) {
-        oled.setCursor(OLED_WIDTH - 31, 1);
-        oled.print(F("FAULT"));
-    }
-
-    // Time: 5 characters x 18 px = 90 px wide, centred.
-    oled.setTextColor(SSD1306_WHITE);
-    oled.setTextSize(3);
-    oled.setCursor(19, 12);
-    oled.print(timeText);
-
-    // Bottom three lines, in priority order:
-    // stuck button > temporary notice > normal instructions.
-    oled.setTextSize(1);
-
+    // Priority: stuck button > temporary notice > normal screen.
     if (startStuck) {
-        printLine(0, F("! START button stuck"));
-        printLine(1, F("Release START, or"));
-        printLine(2, F("check D5 wiring"));
+        snprintf(top, sizeof(top), "! START stuck");
+        snprintf(bottom, sizeof(bottom), "%s",
+                 rotationIndex(2, NOTICE_ROTATE_MS, now) == 0 ? "Release START" : "or check D5 wire");
     } else if (knobStuck) {
-        printLine(0, F("! KNOB button stuck"));
-        printLine(1, F("Release the knob, or"));
-        printLine(2, F("check D4 wiring"));
+        snprintf(top, sizeof(top), "! KNOB stuck");
+        snprintf(bottom, sizeof(bottom), "%s",
+                 rotationIndex(2, NOTICE_ROTATE_MS, now) == 0 ? "Release the knob" : "or check D4 wire");
     } else if (noticeActive(now)) {
-        for (uint8_t i = 0; i < 3; i++) {
-            printLine(i, notice.lines[i]);
+        snprintf(top, sizeof(top), "%s", notice.lines[0]);
+
+        const char* detail = notice.lines[1];
+        if (notice.lines[2] != nullptr &&
+            rotationIndex(2, NOTICE_ROTATE_MS, now - notice.shownAt + NOTICE_ROTATE_MS * 2) == 1) {
+            detail = notice.lines[2];
         }
+        snprintf(bottom, sizeof(bottom), "%s", detail == nullptr ? "" : detail);
     } else {
-        printInstructions(now);
+        uint32_t displaySeconds = selectedSeconds;
+
+        if (timerState == TimerState::Running || timerState == TimerState::Paused) {
+            displaySeconds = remainingSeconds;
+        }
+
+        char timeText[8];
+        formatTime(displaySeconds, timeText, sizeof(timeText));
+
+        // e.g. "RUNNING  ! 00:45" -> mode padded to 9, fault mark, time.
+        snprintf(top, sizeof(top), "%-9s%c %s", stateName(),
+                 hardwareFaultActive() ? '!' : ' ', timeText);
+
+        buildInstruction(bottom, sizeof(bottom), now);
     }
 
-    oled.display();
+    lcdWriteRow(0, top);
+    lcdWriteRow(1, bottom);
 }
 
 // ============================================================
 // SELF-TEST (power-up)
 // ============================================================
 
-void printSelfTestLine(uint8_t y, const char* text) {
-    oled.setCursor(0, y);
-    oled.print(text);
-}
-
 void runSelfTest() {
-    bool faultFound = hardwareFaultActive() || !oledAvailable;
+    bool faultFound = hardwareFaultActive() || !lcdAvailable;
 
     // Serial report.
     Serial.println(F("---- SELF TEST ----"));
-    Serial.print(F("OLED:  "));
-    Serial.println(oledAvailable ? F("OK") : F("NOT FOUND (check SDA/SCL, 5V, GND)"));
+    Serial.print(F("LCD:   "));
+    if (lcdAvailable) {
+        Serial.print(F("OK at 0x"));
+        Serial.println(lcdAddress, HEX);
+    } else {
+        Serial.println(F("NOT FOUND (check SDA/SCL, 5V, GND)"));
+    }
 
     Serial.print(F("IMU:   "));
     switch (imuStatus) {
@@ -808,46 +806,9 @@ void runSelfTest() {
     // LED matrix lamp test.
     drawAllLeds();
 
-    // OLED report.
-    if (oledAvailable) {
-        char line[22];
-
-        oled.clearDisplay();
-        oled.setTextWrap(false);
-        oled.setTextSize(1);
-
-        oled.fillRect(0, 0, OLED_WIDTH, 10, SSD1306_WHITE);
-        oled.setTextColor(SSD1306_BLACK);
-        oled.setCursor(2, 1);
-        oled.print(faultFound ? F("SELF TEST: FAULT") : F("SELF TEST: PASS"));
-        oled.setTextColor(SSD1306_WHITE);
-
-        snprintf(line, sizeof(line), "OLED   OK  (0x%02X)", oledAddress);
-        printSelfTestLine(13, line);
-
-        switch (imuStatus) {
-            case ImuStatus::Ok:
-                snprintf(line, sizeof(line), "IMU    OK  (0x%02X)", imuAddress);
-                break;
-            case ImuStatus::Missing:
-                snprintf(line, sizeof(line), "IMU    NOT FOUND");
-                break;
-            case ImuStatus::WrongChip:
-                snprintf(line, sizeof(line), "IMU    BAD ID 0x%02X", imuChipId);
-                break;
-        }
-        printSelfTestLine(23, line);
-
-        printSelfTestLine(33, startStuck ? "START  HELD/STUCK" : "START  OK");
-        printSelfTestLine(43, knobStuck ? "KNOB   HELD/STUCK" : "KNOB   OK");
-        printSelfTestLine(53, "All 128 LEDs lit?");
-
-        oled.display();
-    }
-
     // Sound: one long beep if there is no screen to read,
     // the error chirp for any other fault, one short beep if all OK.
-    if (!oledAvailable) {
+    if (!lcdAvailable) {
         beep(1, 800);
     } else if (faultFound) {
         errorBeep();
@@ -855,11 +816,46 @@ void runSelfTest() {
         beep(1, 65);
     }
 
-    uint32_t holdMs = faultFound ? SELF_TEST_FAULT_MS : SELF_TEST_OK_MS;
+    // LCD report: title on row 1, one result at a time on row 2.
+    constexpr uint8_t ITEM_COUNT = 5;
+    char items[ITEM_COUNT][LCD_COLUMNS + 1];
+
+    snprintf(items[0], sizeof(items[0]), "LCD   OK  0x%02X", lcdAddress);
+
+    switch (imuStatus) {
+        case ImuStatus::Ok:
+            snprintf(items[1], sizeof(items[1]), "IMU   OK  0x%02X", imuAddress);
+            break;
+        case ImuStatus::Missing:
+            snprintf(items[1], sizeof(items[1]), "IMU   NOT FOUND");
+            break;
+        case ImuStatus::WrongChip:
+            snprintf(items[1], sizeof(items[1]), "IMU   BAD ID %02X", imuChipId);
+            break;
+    }
+
+    snprintf(items[2], sizeof(items[2]), "%s", startStuck ? "START STUCK" : "START OK");
+    snprintf(items[3], sizeof(items[3]), "%s", knobStuck ? "KNOB  STUCK" : "KNOB  OK");
+    snprintf(items[4], sizeof(items[4]), "All LEDs lit?");
+
+    if (lcdAvailable) {
+        lcdWriteRow(0, faultFound ? "SELF TEST: FAULT" : "SELF TEST: PASS");
+    }
+
+    uint32_t totalMs = ITEM_COUNT * SELF_TEST_ITEM_MS +
+                       (faultFound ? SELF_TEST_FAULT_EXTRA_MS : 0);
     uint32_t start = millis();
 
-    while (millis() - start < holdMs) {
+    while (millis() - start < totalMs) {
         updateBeeper();
+
+        if (lcdAvailable) {
+            uint8_t item = static_cast<uint8_t>((millis() - start) / SELF_TEST_ITEM_MS);
+            if (item >= ITEM_COUNT) {
+                item = ITEM_COUNT - 1;
+            }
+            lcdWriteRow(1, items[item]);
+        }
     }
 
     stopBeeper();
@@ -884,7 +880,7 @@ void resetTimer(bool playSound) {
         beep(2, 100, 100);
     }
 
-    updateOLED(true);
+    updateLCD(true);
 }
 
 void startTimer() {
@@ -897,7 +893,7 @@ void startTimer() {
     beep(2, 65, 100);
 
     drawHourglass(remainingSeconds);
-    updateOLED(true);
+    updateLCD(true);
 }
 
 void pauseTimer() {
@@ -908,7 +904,7 @@ void pauseTimer() {
 
     clearNotice();
     beep(1, 180);
-    updateOLED(true);
+    updateLCD(true);
 }
 
 void resumeTimer() {
@@ -918,7 +914,7 @@ void resumeTimer() {
 
     clearNotice();
     beep(2, 65, 100);
-    updateOLED(true);
+    updateLCD(true);
 }
 
 void finishTimer() {
@@ -927,7 +923,7 @@ void finishTimer() {
 
     drawHourglass(0);
     beep(3, 450, 180);
-    updateOLED(true);
+    updateLCD(true);
 }
 
 void handleStartPress() {
@@ -947,8 +943,8 @@ void handleStartPress() {
 
         case TimerState::Setting:
             if (showNotice(NoticeId::StartNotUsed,
-                           "! START not used here", "Turn knob: adjust",
-                           "Press knob: save")) {
+                           "! Use the knob", "Turn = adjust",
+                           "Press = save")) {
                 errorBeep();
             }
             break;
@@ -983,7 +979,7 @@ void updateTimer() {
     }
 
     drawHourglass(remainingSeconds);
-    updateOLED(true);
+    updateLCD(true);
 }
 
 // ============================================================
@@ -1004,7 +1000,7 @@ void enterSettingMode() {
 
     remainingSeconds = selectedSeconds;
     drawHourglass(remainingSeconds);
-    updateOLED(true);
+    updateLCD(true);
 }
 
 void exitSettingMode() {
@@ -1014,7 +1010,7 @@ void exitSettingMode() {
     clearNotice();
     drawHourglass(remainingSeconds);
     beep(1, 300);
-    updateOLED(true);
+    updateLCD(true);
 }
 
 // Saves and leaves SET TIME if the user walks away mid-setting.
@@ -1029,7 +1025,7 @@ void updateSettingTimeout() {
 
     exitSettingMode();
     showNotice(NoticeId::SettingTimedOut,
-               "Time auto-saved", "(no input for 30s)", "START: begin timer");
+               "Time auto-saved", "No input 30s", "START = begin");
 }
 
 // ============================================================
@@ -1042,14 +1038,14 @@ void showKnobLockedNotice() {
     if (timerState == TimerState::Running || timerState == TimerState::Paused) {
         if (imuAvailable) {
             isNew = showNotice(NoticeId::KnobLocked, "! Knob is locked",
-                               "Shake to reset, then", "hold START 5s to set");
+                               "Shake to reset,", "then hold START");
         } else {
             isNew = showNotice(NoticeId::KnobLocked, "! Knob is locked",
-                               "Hold START 5s: reset", "then again to set");
+                               "Hold START 5s", "to reset first");
         }
     } else {
         isNew = showNotice(NoticeId::KnobLocked, "! Knob is locked",
-                           "Hold START 5s to set", "the time first");
+                           "Hold START 5s", "to set the time");
     }
 
     if (isNew) {
@@ -1075,7 +1071,7 @@ void updateStartButton() {
         } else if (startStuck) {
             startStuck = false;
             Serial.println(F("START released. Fault cleared."));
-            updateOLED(true);
+            updateLCD(true);
         } else if (!startHoldHandled) {
             handleStartPress();
         }
@@ -1093,7 +1089,7 @@ void updateStartButton() {
         startHoldHandled = true;
         Serial.println(F("[ERROR] START held for 20s. Stuck button or D5 shorted to GND?"));
         errorBeep();
-        updateOLED(true);
+        updateLCD(true);
         return;
     }
 
@@ -1113,15 +1109,15 @@ void updateStartButton() {
         case TimerState::Paused:
             if (imuAvailable) {
                 if (showNotice(NoticeId::CantSetNow,
-                               "! Can't set time now", "Shake to reset first,",
-                               "then hold START 5s")) {
+                               "! Can't set now", "Shake to reset,",
+                               "then hold START")) {
                     errorBeep();
                 }
             } else {
                 // No IMU means no shake reset, so a long hold resets.
                 resetTimer(true);
                 showNotice(NoticeId::TimerReset,
-                           "Timer reset", "START: begin again", "Hold START 5s: set");
+                           "Timer reset", "START = begin", "Hold START = set");
             }
             break;
 
@@ -1167,11 +1163,11 @@ void updateEncoderRotation() {
         bool isNew;
 
         if (selectedSeconds >= MAX_TIME_SECONDS) {
-            isNew = showNotice(NoticeId::LimitReached, "! Maximum is 10:00",
-                               "Turn the other way", "Press knob: save");
+            isNew = showNotice(NoticeId::LimitReached, "! Max is 10:00",
+                               "Turn other way", "Press knob=save");
         } else {
-            isNew = showNotice(NoticeId::LimitReached, "! Minimum is 00:10",
-                               "Turn the other way", "Press knob: save");
+            isNew = showNotice(NoticeId::LimitReached, "! Min is 00:10",
+                               "Turn other way", "Press knob=save");
         }
 
         if (isNew) {
@@ -1189,7 +1185,7 @@ void updateEncoderRotation() {
     beep(static_cast<uint16_t>(selectedSeconds / 10), 65, 45);
 
     drawHourglass(remainingSeconds);
-    updateOLED(true);
+    updateLCD(true);
 }
 
 void updateEncoderSwitch() {
@@ -1211,7 +1207,7 @@ void updateEncoderSwitch() {
         } else if (knobStuck) {
             knobStuck = false;
             Serial.println(F("KNOB released. Fault cleared."));
-            updateOLED(true);
+            updateLCD(true);
         }
     }
 
@@ -1220,7 +1216,7 @@ void updateEncoderSwitch() {
         knobStuck = true;
         Serial.println(F("[ERROR] KNOB held for 20s. Stuck button or D4 shorted to GND?"));
         errorBeep();
-        updateOLED(true);
+        updateLCD(true);
     }
 }
 
@@ -1325,7 +1321,7 @@ void updateShakeDetection() {
 
         if (wasActive) {
             showNotice(NoticeId::TimerReset,
-                       "Timer reset (shake)", "START: begin again", "Hold START 5s: set");
+                       "Reset by shake", "START = begin", "Hold START = set");
         }
     }
 }
@@ -1355,8 +1351,8 @@ void setup() {
     matrix.clear();
     matrix.update();
 
-    if (!connectOled()) {
-        Serial.println(F("OLED not found. Messages go to Serial only."));
+    if (!connectLcd()) {
+        Serial.println(F("LCD not found. Messages go to Serial only."));
     }
 
     setImuStatus(connectImu(), false);
@@ -1384,7 +1380,7 @@ void setup() {
 
     lastHealthCheckMs = millis();
     lastImuRetryMs = lastHealthCheckMs;
-    lastOledRetryMs = lastHealthCheckMs;
+    lastLcdRetryMs = lastHealthCheckMs;
 
     attachInterrupt(digitalPinToInterrupt(ENCODER_A_PIN), encoderISR, FALLING);
     handledEncoderPosition = readEncoderPosition();
@@ -1412,5 +1408,5 @@ void loop() {
     updateHealth();
 
     updateBeeper();
-    updateOLED();
+    updateLCD();
 }
