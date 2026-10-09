@@ -35,3 +35,47 @@ Put a 1N4148 across the buzzer, cathode to 5V.
 3. Rotate the encoder to change the time in 10 s steps (10 s to 10 min).
 4. Press the encoder to save.
 5. Shake the device to reset the timer.
+## Display guide
+
+### OLED layout
+
+The 128×64 OLED is split into three areas:
+
+| Area | Position | Shows |
+|---|---|---|
+| Mode bar | Top strip (white) | `MODE: <current mode>`, plus `FAULT` on the right if a hardware fault is active |
+| Time | Middle (large) | Time remaining while running/paused, otherwise the selected duration (`MM:SS`) |
+| Instructions | Bottom three lines | What to do next in the current mode, or a temporary message |
+
+### Modes and on-screen instructions
+
+| Mode | Line 1 | Line 2 | Line 3 |
+|---|---|---|---|
+| `READY` | START: begin timer | Hold START 5s: set | Shake: reset |
+| `RUNNING` | START: pause | Shake: reset | Total: 01:00 |
+| `PAUSED` | START: resume | Shake: reset | Total: 01:00 |
+| `SET TIME` | Turn knob: +/-10s | Press knob: save | Range 00:10 - 10:00 |
+| `FINISHED` | TIME'S UP! | START: run again | Hold START 5s: set |
+
+While START is being held towards a 5-second action, the hint changes to a live countdown: **Keep holding: 4s… 3s… 2s… 1s**.
+
+If no IMU is detected, the shake hints change to **Shake: off (no IMU)** and **Hold START 5s: reset**. Holding START for 5 seconds then resets a running or paused timer instead.
+
+### Sounds
+
+| Sound | Meaning |
+|---|---|
+| 2 short beeps | Timer started or resumed |
+| 1 medium beep | Timer paused |
+| 1 short beep | 10-second mark reached (50, 40, 30, 20, 10) |
+| 3 long beeps | Time's up |
+| 2 medium beeps | Entered SET TIME mode |
+| 1 long beep (300 ms) | Time saved, left SET TIME |
+| N short beeps | New time selected: one beep per 10 seconds (e.g. 6 beeps = 01:00) |
+| 2 slow beeps | Timer reset by shaking |
+| **3 fast chirps** | **Action not allowed, or a fault was detected** |
+| **1 very long beep (800 ms)** | **OLED missing or disconnected** |
+
+### User messages
+
+These replace the bottom
