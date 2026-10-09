@@ -1151,12 +1151,16 @@ void updateEncoderRotation() {
 
     settingActivityMs = millis();
 
-    int32_t newTime = static_cast<int32_t>(selectedSeconds) +
+       int32_t newTime = static_cast<int32_t>(selectedSeconds) +
                       delta * static_cast<int32_t>(TIME_STEP_SECONDS);
 
-    newTime = constrain(newTime,
-                        static_cast<int32_t>(MIN_TIME_SECONDS),
-                        static_cast<int32_t>(MAX_TIME_SECONDS));
+    if (newTime < static_cast<int32_t>(MIN_TIME_SECONDS)) {
+        newTime = static_cast<int32_t>(MIN_TIME_SECONDS);
+    }
+
+    if (newTime > static_cast<int32_t>(MAX_TIME_SECONDS)) {
+        newTime = static_cast<int32_t>(MAX_TIME_SECONDS);
+    }
 
     if (static_cast<uint32_t>(newTime) == selectedSeconds) {
         // Already at a limit and turning further into it.
@@ -1167,25 +1171,3 @@ void updateEncoderRotation() {
                                "Turn the other way", "Press knob: save");
         } else {
             isNew = showNotice(NoticeId::LimitReached, "! Minimum is 00:10",
-                               "Turn the other way", "Press knob: save");
-        }
-
-        if (isNew) {
-            errorBeep();
-        }
-        return;
-    }
-
-    clearNotice();
-
-    selectedSeconds = static_cast<uint32_t>(newTime);
-    remainingSeconds = selectedSeconds;
-
-    // One short beep per 10 seconds selected (60 s = 6 beeps).
-    beep(static_cast<uint16_t>(selectedSeconds / 10), 65, 45);
-
-    drawHourglass(remainingSeconds);
-    updateOLED(true);
-}
-
-void updateEncoderSwitch()
