@@ -1151,7 +1151,7 @@ void updateEncoderRotation() {
 
     settingActivityMs = millis();
 
-       int32_t newTime = static_cast<int32_t>(selectedSeconds) +
+    int32_t newTime = static_cast<int32_t>(selectedSeconds) +
                       delta * static_cast<int32_t>(TIME_STEP_SECONDS);
 
     if (newTime < static_cast<int32_t>(MIN_TIME_SECONDS)) {
@@ -1205,6 +1205,8 @@ void updateEncoderSwitch() {
 
             if (timerState == TimerState::Setting) {
                 exitSettingMode();
+            } else {
+                showKnobLockedNotice();
             }
         } else if (knobStuck) {
             knobStuck = false;
@@ -1275,7 +1277,7 @@ bool detectShake() {
     float magnitude;
 
     if (!readAccelerationMagnitude(magnitude)) {
-        if (imuAvailable && ++imuFailCount >= IMU_FAIL_LIMIT) {
+        if (imuAvailable && imuZeroCount == 0 && ++imuFailCount >= IMU_FAIL_LIMIT) {
             Serial.println(F("[ERROR] IMU stopped answering on I2C."));
             setImuStatus(ImuStatus::Missing, true);
         }
@@ -1316,10 +1318,15 @@ void updateShakeDetection() {
     }
 
     if (detectShake()) {
+        bool wasActive = (timerState != TimerState::Ready);
+
         resetTimer(false);
         beep(2, 180, 150);
-        showNotice(NoticeId::TimerReset,
-                   "Timer reset", "START: begin again", "Hold START 5s: set");
+
+        if (wasActive) {
+            showNotice(NoticeId::TimerReset,
+                       "Timer reset (shake)", "START: begin again", "Hold START 5s: set");
+        }
     }
 }
 
