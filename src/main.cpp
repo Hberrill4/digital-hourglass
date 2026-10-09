@@ -21,7 +21,7 @@
 // Changes from v1:
 // - Encoder counted by interrupt (no missed detents during I2C)
 // - MAX7219 auto-update disabled; one SPI flush per frame
-// - I2C at 400 kHz
+// - I2C at 400 kHz (held there for the OLED and the IMU)
 // - OLED text positions fit inside 64 px
 // - 10-second beeps fire at 50, 40, 30 ... instead of 59, 49 ...
 // - Pause/resume keeps the partial second
@@ -58,7 +58,12 @@ constexpr int8_t OLED_RESET_PIN = -1;
 constexpr uint8_t OLED_ADDRESS = 0x3C;
 constexpr uint32_t OLED_REFRESH_MS = 150;
 
-Adafruit_SSD1306 oled(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RESET_PIN);
+constexpr uint32_t I2C_CLOCK_HZ = 400000UL;
+
+// The last two arguments stop the library dropping the bus back to
+// 100 kHz after every display update.
+Adafruit_SSD1306 oled(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RESET_PIN,
+                      I2C_CLOCK_HZ, I2C_CLOCK_HZ);
 bool oledAvailable = false;
 
 // ---------------- GY-87 IMU ----------------
@@ -632,7 +637,7 @@ void setup() {
     Serial.begin(115200);
 
     Wire.begin();
-    Wire.setClock(400000);
+    Wire.setClock(I2C_CLOCK_HZ);
 
     // MAX7219 matrices: manual update mode, one flush per frame.
     matrix.begin();
