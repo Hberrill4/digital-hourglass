@@ -1171,3 +1171,239 @@ void updateEncoderRotation() {
                                "Turn the other way", "Press knob: save");
         } else {
             isNew = showNotice(NoticeId::LimitReached, "! Minimum is 00:10",
+                               "Turn the other way", "Press knob: save");
+        }
+
+        if (isNew) {
+            errorBeep();
+        }
+        return;
+    }
+
+    clearNotice();
+
+    selectedSeconds = static_cast<uint32_t>(newTime);
+    remainingSeconds = selectedSeconds;
+
+    // One short beep per 10 seconds selected (60 s = 6 beeps).
+    beep(static_cast<uint16_t>(selectedSeconds / 10), 65, 45);
+
+    drawHourglass(remainingSeconds);
+    updateOLED(true);
+}
+
+void updateEncoderSwitch() {
+    uint32_t now = millis();
+    bool pressed = digitalRead(ENCODER_SW_PIN) == LOW;
+
+    if (pressed != encoderSwitchDown && now - lastEncoderSwitchEdge >= DEBOUNCE_MS) {
+        lastEncoderSwitchEdge = now;
+        encoderSwitchDown = pressed;
+
+        if (pressed) {
+            encoderSwitchPressedAt = now;
+
+            if (timerState == TimerState::Setting) {
+                exitSettingMode();
+            }
+        } else if (knobStuck) {
+            knobStuck = false;
+            Serial.println(F("KNOB released. Fault cleared."));
+            updateOLED(true);
+        }
+    }
+
+    // Held far longer than any real use: treat as stuck or shorted.
+    if (pressed && !knobStuck && now - encoderSwitchPressedAt >= BUTTON_STUCK_MS) {
+        knobStuck = true;
+        Serial.println(F("[ERROR] KNOB held for 20s. Stuck button or D4 shorted to GND?"));
+        errorBeep();
+        updateOLED(true);
+    }
+}
+
+// ============================================================
+// GY-87 SHAKE DETECTION
+// ============================================================
+
+// Reads the accelerometer straight from the registers so that a
+// failed I2C read can be told apart from a real measurement.
+bool readAccelerationMagnitude(float& magnitude) {
+    Wire.beginTransmission(imuAddress);
+    Wire.write(IMU_REG_ACCEL_XOUT_H);
+
+    if (Wire.endTransmission(false) != 0) {
+        return false;
+    }
+
+    if (Wire.requestFrom(imuAddress, static_cast<size_t>(6)) != 6) {
+        return false;
+    }
+
+    int16_t raw[3];
+
+    for (uint8_t i = 0; i < 3; i++) {
+        uint8_t high = static_cast<uint8_t>(Wire.read());
+        uint8_t low = static_cast<uint8_t>(Wire.read());
+        raw[i] = static_cast<int16_t>((high << 8) | low);
+    }
+
+    // All zeros = chip reset or lost power (it reads 0 until re-configured).
+    if (raw[0] == 0 && raw[1] == 0 && raw[2] == 0) {
+        if (++imuZeroCount >= IMU_ZERO_LIMIT) {
+            Serial.println(F("[ERROR] IMU reading all zeros. Power lost or reset?"));
+            setImuStatus(ImuStatus::Missing, true);
+        }
+        return false;
+    }
+
+    imuZeroCount = 0;
+
+    float ax = raw[0] / IMU_COUNTS_PER_G * STANDARD_GRAVITY;
+    float ay = raw[1] / IMU_COUNTS_PER_G * STANDARD_GRAVITY;
+    float az = raw[2] / IMU_COUNTS_PER_G * STANDARD_GRAVITY;
+
+    magnitude = sqrtf(ax * ax + ay * ay + az * az);
+    return true;
+}
+
+bool detectShake() {
+    if (!imuAvailable) {
+        return false;
+    }
+
+    float magnitude;
+
+    if (!readAccelerationMagnitude(magnitude)) {
+        if (imuAvailable && ++imuFailCount >= IMU_FAIL_LIMIT) {
+            Serial.println(F("[ERROR] IMU stopped answering on I2C."));
+            setImuStatus(ImuStatus::Missing, true);
+        }
+        return false;
+    }
+
+    imuFailCount = 0;
+
+    float change = fabsf(magnitude - previousAccelerationMagnitude);
+    previousAccelerationMagnitude = magnitude;
+
+    uint32_t now = millis();
+
+    // A shake = two large jolts within SHAKE_CONFIRM_MS.
+    if (change > SHAKE_THRESHOLD) {
+        if (shakeCandidateAt != 0 &&
+            now - shakeCandidateAt <= SHAKE_CONFIRM_MS &&
+            now - lastShakeAt >= SHAKE_COOLDOWN_MS) {
+
+            shakeCandidateAt = 0;
+            lastShakeAt = now;
+            return true;
+        }
+
+        shakeCandidateAt = now;
+    }
+
+    if (shakeCandidateAt != 0 && now - shakeCandidateAt > SHAKE_CONFIRM_MS) {
+        shakeCandidateAt = 0;
+    }
+
+    return false;
+}
+
+void updateShakeDetection() {
+    if (timerState == TimerState::Setting) {
+        return;
+    }
+
+    if (detectShake()) {
+        resetTimer(false);
+        beep(2, 180, 150);
+        showNotice(NoticeId::TimerReset,
+                   "Timer reset", "START: begin again", "Hold START 5s: set");
+    }
+}
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup() {
+    pinMode(ENCODER_A_PIN, INPUT_PULLUP);
+    pinMode(ENCODER_B_PIN, INPUT_PULLUP);
+    pinMode(ENCODER_SW_PIN, INPUT_PULLUP);
+    pinMode(START_BUTTON_PIN, INPUT_PULLUP);
+
+    pinMode(BUZZER_PIN, OUTPUT);
+    digitalWrite(BUZZER_PIN, LOW);
+
+    Serial.begin(115200);
+
+    Wire.begin();
+    Wire.setClock(I2C_CLOCK_HZ);
+
+    // MAX7219 matrices: manual update mode, one flush per frame.
+    matrix.begin();
+    matrix.control(MD_MAX72XX::UPDATE, MD_MAX72XX::OFF);
+    matrix.control(MD_MAX72XX::INTENSITY, MATRIX_BRIGHTNESS);
+    matrix.clear();
+    matrix.update();
+
+    if (!connectOled()) {
+        Serial.println(F("OLED not found. Messages go to Serial only."));
+    }
+
+    setImuStatus(connectImu(), false);
+
+    // A button held at power-up is reported as stuck until released,
+    // and that press is never acted on.
+    uint32_t now = millis();
+
+    if (digitalRead(START_BUTTON_PIN) == LOW) {
+        startButtonDown = true;
+        startHoldHandled = true;
+        startStuck = true;
+        startPressedAt = now;
+        lastStartEdge = now;
+    }
+
+    if (digitalRead(ENCODER_SW_PIN) == LOW) {
+        encoderSwitchDown = true;
+        knobStuck = true;
+        encoderSwitchPressedAt = now;
+        lastEncoderSwitchEdge = now;
+    }
+
+    runSelfTest();
+
+    lastHealthCheckMs = millis();
+    lastImuRetryMs = lastHealthCheckMs;
+    lastOledRetryMs = lastHealthCheckMs;
+
+    attachInterrupt(digitalPinToInterrupt(ENCODER_A_PIN), encoderISR, FALLING);
+    handledEncoderPosition = readEncoderPosition();
+
+    selectedSeconds = DEFAULT_TIME_SECONDS;
+    resetTimer(false);
+
+    Serial.println(F("Digital Hourglass ready."));
+    Serial.println(F("Hold START 5 s to set time, rotate to adjust, press encoder to save."));
+}
+
+// ============================================================
+// MAIN LOOP
+// ============================================================
+
+void loop() {
+    updateStartButton();
+
+    updateEncoderRotation();
+    updateEncoderSwitch();
+    updateSettingTimeout();
+
+    updateTimer();
+    updateShakeDetection();
+    updateHealth();
+
+    updateBeeper();
+    updateOLED();
+}
