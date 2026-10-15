@@ -20,13 +20,42 @@
 
 Put a 1N4148 across the buzzer, cathode to 5V.
 
-## Build steps
+## Bill of Materials
 
-1. Wire everything as in the table above.
-2. Open this folder in VS Code with PlatformIO.
-3. Build and upload to the UNO R4 WiFi.
-4. Open the serial monitor at 115200 baud.
-5. Check for "OLED detected", "MPU6050 detected" and "Digital Hourglass ready".
+| # | Component | Part / Model | Qty | Purpose | Connects to |
+|---|---|---|---|---|---|
+| 1 | Microcontroller board | Arduino UNO R4 WiFi (ABX00087) | 1 | Runs the firmware | USB-C to PC / 5 V supply |
+| 2 | LED matrix module | MAX7219 8×8 dot matrix, FC16 type | 2 | The two hourglass chambers (128 LEDs of "sand") | DIN D11, CLK D13, CS D10, 5V, GND; second module daisy-chained from the first |
+| 3 | LCD display | 16×2 LCD 1602 with I2C backpack (PCF8574, address 0x27 / 0x3F) | 1 | Shows mode, time, instructions and error messages | SDA A4, SCL A5, 5V, GND |
+| 4 | Motion sensor | GY-87 IMU module (MPU6050 accelerometer, address 0x68) | 1 | Detects a shake to reset the timer | SDA A4, SCL A5, VCC_IN 5V, GND |
+| 5 | Rotary encoder | KY-040 module (20 detents, with push switch) | 1 | Sets the time (turn) and saves it (press) | CLK D2, DT D3, SW D4, + 5V, GND |
+| 6 | Push button | 6×6 mm tactile switch (e.g. Omron B3F-1000) | 1 | START / pause / resume; hold 5 s to set the time | D5 and GND |
+| 7 | Buzzer | TMB12A05 active magnetic buzzer, 5 V, 30 mA (equivalent: PUI Audio AI-1223-TWT-5V-R) | 1 | Audio feedback and alarms | + to 5V, − to Q1 collector |
+| 8 | NPN transistor | PN2222A / 2N2222A, TO-92 (BC547 also works) | 1 | Switches the buzzer (draws more current than a pin can supply) | Base via R1 to D6, emitter to GND, collector to buzzer − |
+| 9 | Resistor | 1 kΩ, ¼ W | 1 | Limits transistor base current | Between D6 and Q1 base |
+| 10 | Diode | 1N4148 | 1 | Flyback protection for the buzzer coil | Across the buzzer, stripe (cathode) on the 5V side |
+| 11 | Capacitor (optional) | 100 µF electrolytic, ≥ 10 V | 1 | Smooths the 5 V supply, prevents brown-outs | Across 5V and GND near the matrices (+ to 5V) |
+| 12 | Breadboard | Full-size (830 tie-point) | 1 | Prototyping and shared 5V / GND rails | — |
+| 13 | Jumper wires | Male-to-male and male-to-female Dupont | ~30 | Connections | — |
+| 14 | USB cable | USB-C data cable | 1 | Power, programming and Serial Monitor | Arduino USB-C port |
+
+### Software libraries
+
+| Library | Author | Used for |
+|---|---|---|
+| MD_MAX72XX | majicDesigns | Driving the MAX7219 LED matrices |
+| LiquidCrystal I2C | Frank de Brabander (PlatformIO: `marcoschwartz/LiquidCrystal_I2C`) | Driving the I2C LCD 1602 |
+| Adafruit MPU6050 | Adafruit | Configuring the motion sensor |
+| Adafruit Unified Sensor | Adafruit | Dependency of Adafruit MPU6050 |
+| Adafruit BusIO | Adafruit | Dependency of Adafruit MPU6050 |
+| Wire, SPI | Arduino (built in) | I2C and SPI communication |
+
+### Notes
+
+- All modules share a **common ground** with the Arduino.
+- The I2C bus runs at **100 kHz** because the LCD backpack's PCF8574 chip is rated for that speed.
+- Turn the **blue contrast knob** on the back of the LCD if the screen is blank or shows solid blocks.
+- PN2222A pinout (flat face towards you, legs down): **E – B – C**.
 
 ## Controls
 
