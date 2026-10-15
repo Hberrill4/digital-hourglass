@@ -31,13 +31,7 @@ Put a 1N4148 across the buzzer, cathode to 5V.
 | 5 | Rotary encoder | KY-040 module (20 detents, with push switch) | 1 | Sets the time (turn) and saves it (press) | CLK D2, DT D3, SW D4, + 5V, GND |
 | 6 | Push button | 6×6 mm tactile switch (e.g. Omron B3F-1000) | 1 | START / pause / resume; hold 5 s to set the time | D5 and GND |
 | 7 | Buzzer | TMB12A05 active magnetic buzzer, 5 V, 30 mA (equivalent: PUI Audio AI-1223-TWT-5V-R) | 1 | Audio feedback and alarms | + to 5V, − to Q1 collector |
-| 8 | NPN transistor | PN2222A / 2N2222A, TO-92 (BC547 also works) | 1 | Switches the buzzer (draws more current than a pin can supply) | Base via R1 to D6, emitter to GND, collector to buzzer − |
-| 9 | Resistor | 1 kΩ, ¼ W | 1 | Limits transistor base current | Between D6 and Q1 base |
-| 10 | Diode | 1N4148 | 1 | Flyback protection for the buzzer coil | Across the buzzer, stripe (cathode) on the 5V side |
-| 11 | Capacitor (optional) | 100 µF electrolytic, ≥ 10 V | 1 | Smooths the 5 V supply, prevents brown-outs | Across 5V and GND near the matrices (+ to 5V) |
-| 12 | Breadboard | Full-size (830 tie-point) | 1 | Prototyping and shared 5V / GND rails | — |
-| 13 | Jumper wires | Male-to-male and male-to-female Dupont | ~30 | Connections | — |
-| 14 | USB cable | USB-C data cable | 1 | Power, programming and Serial Monitor | Arduino USB-C port |
+
 
 ### Software libraries
 
