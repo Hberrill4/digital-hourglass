@@ -33,24 +33,6 @@ Put a 1N4148 across the buzzer, cathode to 5V.
 | 7 | Buzzer | TMB12A05 active magnetic buzzer, 5 V, 30 mA (equivalent: PUI Audio AI-1223-TWT-5V-R) | 1 | Audio feedback and alarms | + to 5V, − to Q1 collector |
 
 
-### Software libraries
-
-| Library | Author | Used for |
-|---|---|---|
-| MD_MAX72XX | majicDesigns | Driving the MAX7219 LED matrices |
-| LiquidCrystal I2C | Frank de Brabander (PlatformIO: `marcoschwartz/LiquidCrystal_I2C`) | Driving the I2C LCD 1602 |
-| Adafruit MPU6050 | Adafruit | Configuring the motion sensor |
-| Adafruit Unified Sensor | Adafruit | Dependency of Adafruit MPU6050 |
-| Adafruit BusIO | Adafruit | Dependency of Adafruit MPU6050 |
-| Wire, SPI | Arduino (built in) | I2C and SPI communication |
-
-### Notes
-
-- All modules share a **common ground** with the Arduino.
-- The I2C bus runs at **100 kHz** because the LCD backpack's PCF8574 chip is rated for that speed.
-- Turn the **blue contrast knob** on the back of the LCD if the screen is blank or shows solid blocks.
-- PN2222A pinout (flat face towards you, legs down): **E – B – C**.
-
 ## Controls
 
 1. Press START to start, pause or resume.
