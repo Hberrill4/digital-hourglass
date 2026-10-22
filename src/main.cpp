@@ -29,7 +29,11 @@
 // - START or remote PLAY/OK: start / pause / resume
 // - Hold START 5 s, shake, or remote RESET: reset the timer
 // - Remote digits then OK: type an exact time (1, 3, 0, OK = 1:30)
-// - Remote +/- : 10 s, remote PREV/NEXT : 1 min, remote CH: presets
+// - Remote +/- : 10 s, remote PREV/NEXT : 1 min, remote CH: food timers
+//
+// Food timers: CH picks a food. Its name is beeped in Morse code, the
+// matrices show the food and an hourglass, and while the timer runs the
+// food drains from the top chamber and rebuilds in the bottom one.
 //
 // Pot "takeover": after the remote sets a time, the pot is ignored
 // until it is turned, so the time never jumps by itself.
@@ -147,11 +151,34 @@ const KeyCode ARROW_KEYS[] = {
 
 const char* RESET_KEY_NAME = (REMOTE_LAYOUT == RemoteLayout::CarMp3_21Key) ? "EQ" : "#";
 
-struct Preset { const char* name; uint32_t seconds; };
-const Preset PRESETS[] = {
-    {"Brush teeth", 120}, {"Tea", 180}, {"Plank", 60}, {"Soft egg", 360}, {"Pasta", 600}
+// ---------------- FOOD TIMERS ----------------
+// 8x8 pictures, top row first, leftmost pixel = highest bit.
+struct Food {
+    const char* name;       // shown on the OLED (max 11 characters)
+    const char* morse;      // word beeped in Morse code
+    uint32_t seconds;       // normal cooking time
+    uint8_t bitmap[8];
 };
-constexpr uint8_t PRESET_COUNT = sizeof(PRESETS) / sizeof(PRESETS[0]);
+
+const Food FOODS[] = {
+    {"Soft egg",    "EGG",      360, {0b00011000, 0b00111100, 0b01111110, 0b01111110,
+                                      0b11111111, 0b11111111, 0b01111110, 0b00111100}},
+    {"Spaghetti",   "PASTA",    600, {0b00111100, 0b01000010, 0b10011001, 0b10100101,
+                                      0b10100101, 0b10011001, 0b01000010, 0b00111100}},
+    {"Noodles",     "NOODLES",  180, {0b00000110, 0b00011000, 0b01100000, 0b11111111,
+                                      0b01111110, 0b01111110, 0b00111100, 0b00111100}},
+    {"Popcorn",     "POPCORN",  150, {0b01010010, 0b10101101, 0b01111110, 0b11011011,
+                                      0b01011010, 0b01011010, 0b00111100, 0b00111100}},
+    {"Broccoli",    "BROCCOLI", 240, {0b01101100, 0b11111110, 0b11111111, 0b01111110,
+                                      0b00011000, 0b00011000, 0b00111100, 0b00000000}},
+    {"Corn on cob", "CORN",     300, {0b00011000, 0b00110100, 0b00101100, 0b00110100,
+                                      0b00101100, 0b01011010, 0b10011001, 0b00011000}},
+};
+constexpr uint8_t FOOD_COUNT = sizeof(FOODS) / sizeof(FOODS[0]);
+
+const uint8_t HOURGLASS_ICON[8] = {0b11111111, 0b01000010, 0b00100100, 0b00011000,
+                                   0b00011000, 0b00100100, 0b01011010, 0b11111111};
+constexpr uint32_t FOOD_SPLASH_MS = 2500;
 
 constexpr uint32_t IR_REPEAT_MS = 200;      // held +/- keys repeat at this rate
 constexpr uint32_t ENTRY_TIMEOUT_MS = 6000; // typed digits are cancelled after this
@@ -201,7 +228,10 @@ bool entryActive = false;         // typing digits on the remote
 uint16_t entryValue = 0;          // up to 4 digits, read as MMSS
 uint8_t entryDigits = 0;
 uint32_t entryLastKeyMs = 0;
-uint8_t presetIndex = 0;
+uint8_t nextFood = 0;            // the food CH selects next
+int8_t activeFood = -1;          // -1 = plain sand, else index into FOODS
+bool splashActive = false;
+uint32_t splashUntilMs = 0;
 uint32_t lastIrActionMs = 0;
 RemoteKey lastIrKey = RemoteKey::None;
 
@@ -210,15 +240,29 @@ uint32_t lastImuRetryMs = 0;
 uint32_t lastOledRetryMs = 0;
 
 // ============================================================
-// BUZZER (non-blocking)
+// BUZZER (non-blocking sequence player)
 // ============================================================
+// A sound is a list of (on ms, off ms) steps played in the background.
+// beep() plays N identical steps; morseAppend() adds a word in Morse.
+
+constexpr uint8_t BEEP_MAX_STEPS = 80;
+constexpr uint16_t MORSE_DOT_MS = 60;      // ~20 words per minute
 
 struct Beeper {
-    uint16_t totalBeeps = 0, completedBeeps = 0, onTimeMs = 65, offTimeMs = 100;
+    uint16_t onMs[BEEP_MAX_STEPS];
+    uint16_t offMs[BEEP_MAX_STEPS];
+    uint8_t count = 0;
+    uint8_t index = 0;
     uint32_t nextChangeMs = 0;
     bool active = false, sounding = false;
 };
 Beeper beeper;
+
+// International Morse code, A-Z
+const char* const MORSE_CODE[26] = {
+    ".-", "-...", "-.-.", "-..", ".", "..-.", "--.", "....", "..", ".---", "-.-", ".-..", "--",
+    "-.", "---", ".--.", "--.-", ".-.", "...", "-", "..-", "...-", ".--", "-..-", "-.--", "--.."
+};
 
 void stopBeeper() {
     beeper.active = false;
@@ -226,17 +270,46 @@ void stopBeeper() {
     digitalWrite(BUZZER_PIN, LOW);
 }
 
-void beep(uint16_t count, uint16_t onMs, uint16_t offMs = 100) {
+void beepClear() {
     stopBeeper();
-    if (count == 0) return;
-    beeper.totalBeeps = count;
-    beeper.completedBeeps = 0;
-    beeper.onTimeMs = onMs;
-    beeper.offTimeMs = offMs;
+    beeper.count = 0;
+}
+
+void beepAppend(uint16_t onMs, uint16_t offMs) {
+    if (beeper.count >= BEEP_MAX_STEPS) return;
+    beeper.onMs[beeper.count] = onMs;
+    beeper.offMs[beeper.count] = offMs;
+    beeper.count++;
+}
+
+void beepStart() {
+    if (beeper.count == 0) return;
+    beeper.index = 0;
     beeper.active = true;
     beeper.sounding = true;
     digitalWrite(BUZZER_PIN, HIGH);
-    beeper.nextChangeMs = millis() + onMs;
+    beeper.nextChangeMs = millis() + beeper.onMs[0];
+}
+
+void beep(uint16_t count, uint16_t onMs, uint16_t offMs = 100) {
+    beepClear();
+    for (uint16_t i = 0; i < count; i++) beepAppend(onMs, offMs);
+    beepStart();
+}
+
+// Dot = 1 unit, dash = 3, gap inside a letter = 1, between letters = 3.
+void morseAppend(const char* word) {
+    for (const char* p = word; *p; p++) {
+        char c = *p;
+        if (c >= 'a' && c <= 'z') c -= 32;
+        if (c < 'A' || c > 'Z') continue;
+        const char* code = MORSE_CODE[c - 'A'];
+        for (const char* e = code; *e; e++) {
+            uint16_t on = (*e == '.') ? MORSE_DOT_MS : 3 * MORSE_DOT_MS;
+            uint16_t off = (e[1] != '\0') ? MORSE_DOT_MS : 3 * MORSE_DOT_MS;
+            beepAppend(on, off);
+        }
+    }
 }
 
 void errorBeep() { beep(3, 40, 40); }   // three fast chirps = "no"
@@ -249,15 +322,16 @@ void updateBeeper() {
     if (beeper.sounding) {
         digitalWrite(BUZZER_PIN, LOW);
         beeper.sounding = false;
-        if (++beeper.completedBeeps >= beeper.totalBeeps) {
+        if (beeper.index + 1 >= beeper.count) {
             beeper.active = false;
             return;
         }
-        beeper.nextChangeMs = millis() + beeper.offTimeMs;
+        beeper.nextChangeMs = millis() + beeper.offMs[beeper.index];
     } else {
+        beeper.index++;
         digitalWrite(BUZZER_PIN, HIGH);
         beeper.sounding = true;
-        beeper.nextChangeMs = millis() + beeper.onTimeMs;
+        beeper.nextChangeMs = millis() + beeper.onMs[beeper.index];
     }
 }
 
@@ -266,7 +340,7 @@ void updateBeeper() {
 // ============================================================
 
 enum class NoticeId : uint8_t {
-    None, CantChange, InvalidTime, OutOfRange, TimeSet, PresetSet, Cancelled,
+    None, CantChange, InvalidTime, OutOfRange, TimeSet, FoodSet, Cancelled,
     UnknownKey, PotLocked, TimerReset, ImuConnected, ImuLost, ImuWrongChip
 };
 
@@ -276,7 +350,7 @@ struct Notice {
     uint32_t shownAt = 0, durationMs = 0;
 };
 Notice notice;
-char noticeText[2][22];       // for notices with numbers in them
+char noticeText[3][22];       // for notices with numbers or names in them
 
 void updateOLED(bool force = false);
 
@@ -432,9 +506,46 @@ void setPixel(uint8_t row, uint16_t column, bool on) {
     if (row < 8 && column < 16) matrix.setPoint(row, column, on);
 }
 
+// chamber 0 = lower (columns 0-7), 1 = upper (columns 8-15); x 0 = left, y 0 = top
+void setChamberPixel(uint8_t chamber, uint8_t x, uint8_t y, bool on) {
+    setPixel(y, chamber * 8 + (7 - x), on);
+}
+
+bool bitmapPixel(const uint8_t bitmap[8], uint8_t x, uint8_t y) {
+    return bitmap[y] & (0x80 >> x);
+}
+
+// The food is the sand: it drains from the top of the upper chamber
+// and rebuilds from the bottom of the lower chamber.
+void drawFoodHourglass(const Food& food, uint32_t secondsLeft) {
+    uint8_t pixels = 0;
+    for (uint8_t y = 0; y < 8; y++)
+        for (uint8_t x = 0; x < 8; x++) pixels += bitmapPixel(food.bitmap, x, y);
+
+    uint32_t elapsed = selectedSeconds - secondsLeft;
+    uint8_t moved = static_cast<uint8_t>((elapsed * pixels) / selectedSeconds);
+
+    uint8_t k = 0;
+    for (uint8_t y = 0; y < 8; y++)                       // upper: top rows leave first
+        for (uint8_t x = 0; x < 8; x++)
+            if (bitmapPixel(food.bitmap, x, y)) setChamberPixel(1, x, y, k++ >= moved);
+
+    k = 0;
+    for (int8_t y = 7; y >= 0; y--)                       // lower: bottom rows arrive first
+        for (uint8_t x = 0; x < 8; x++)
+            if (bitmapPixel(food.bitmap, x, y)) setChamberPixel(0, x, y, k++ < moved);
+}
+
 void drawHourglass(uint32_t secondsLeft) {
+    if (splashActive) return;                             // splash stays up until it ends
     matrix.clear();
     if (secondsLeft > selectedSeconds) secondsLeft = selectedSeconds;
+
+    if (activeFood >= 0) {
+        drawFoodHourglass(FOODS[activeFood], secondsLeft);
+        matrix.update();
+        return;
+    }
 
     uint32_t elapsed = selectedSeconds - secondsLeft;
     uint8_t sandMoved = static_cast<uint8_t>((elapsed * 64UL) / selectedSeconds);
@@ -449,6 +560,31 @@ void drawHourglass(uint32_t secondsLeft) {
         }
     }
     matrix.update();
+}
+
+// Food picture in the upper chamber, an hourglass in the lower one.
+void showFoodSplash(const Food& food) {
+    matrix.clear();
+    for (uint8_t y = 0; y < 8; y++) {
+        for (uint8_t x = 0; x < 8; x++) {
+            setChamberPixel(1, x, y, bitmapPixel(food.bitmap, x, y));
+            setChamberPixel(0, x, y, bitmapPixel(HOURGLASS_ICON, x, y));
+        }
+    }
+    matrix.update();
+    splashActive = true;
+    splashUntilMs = millis() + FOOD_SPLASH_MS;
+}
+
+void endSplash() {
+    splashActive = false;
+}
+
+void updateSplash() {
+    if (splashActive && static_cast<int32_t>(millis() - splashUntilMs) >= 0) {
+        splashActive = false;
+        drawHourglass(remainingSeconds);
+    }
 }
 
 // All LEDs at normal brightness (MAX7219 TEST mode would force full brightness).
@@ -511,7 +647,12 @@ void printInstructions(uint32_t now) {
         case TimerState::Ready:
             printLine(0, "START/OK: begin");
             printLine(1, potHasControl ? "Turn pot: set time" : "Turn pot to adjust");
-            printLine(2, "Remote: 0-9 then OK");
+            if (activeFood >= 0) {
+                snprintf(buf, sizeof(buf), "Food: %s", FOODS[activeFood].name);
+                printLine(2, buf);
+            } else {
+                printLine(2, "Remote: 0-9 then OK");
+            }
             break;
         case TimerState::Running:
         case TimerState::Paused:
@@ -520,12 +661,18 @@ void printInstructions(uint32_t now) {
             formatTime(selectedSeconds, buf, sizeof(buf));
             {
                 char total[22];
-                snprintf(total, sizeof(total), "Total %s", buf);
+                snprintf(total, sizeof(total), "%s %s",
+                         activeFood >= 0 ? FOODS[activeFood].name : "Total", buf);
                 printLine(2, total);
             }
             break;
         case TimerState::Finished:
-            printLine(0, "TIME'S UP!");
+            if (activeFood >= 0) {
+                snprintf(buf, sizeof(buf), "%s is ready!", FOODS[activeFood].name);
+                printLine(0, buf);
+            } else {
+                printLine(0, "TIME'S UP!");
+            }
             printLine(1, "START/OK: run again");
             printLine(2, "Pot/remote: new time");
             break;
@@ -592,6 +739,7 @@ void lockPot() {                  // pot must be turned before it acts again
 }
 
 void resetTimer(bool playSound) {
+    endSplash();
     timerState = TimerState::Ready;
     remainingSeconds = selectedSeconds;
     lastTimerTickMs = millis();
@@ -604,6 +752,7 @@ void resetTimer(bool playSound) {
 }
 
 void startTimer() {
+    endSplash();
     remainingSeconds = selectedSeconds;
     timerState = TimerState::Running;
     lastTimerTickMs = millis();
@@ -636,7 +785,12 @@ void finishTimer() {
     remainingSeconds = 0;
     lockPot();
     drawHourglass(0);
-    beep(3, 450, 180);
+    beepClear();                                    // three long beeps ...
+    beepAppend(450, 180);
+    beepAppend(450, 180);
+    beepAppend(450, 600);
+    if (activeFood >= 0) morseAppend(FOODS[activeFood].morse);   // ... then the food in Morse
+    beepStart();
     updateOLED(true);
 }
 
@@ -654,7 +808,10 @@ bool canChangeTime() {
 }
 
 // Sets a new selected time from the pot or the remote.
-void applySelectedTime(uint32_t seconds, bool fromRemote) {
+// Any time that is not a food timer switches back to plain sand.
+void applySelectedTime(uint32_t seconds, bool fromRemote, bool keepFood = false) {
+    if (!keepFood) activeFood = -1;
+    endSplash();
     selectedSeconds = seconds;
     remainingSeconds = seconds;
     timerState = TimerState::Ready;
@@ -848,15 +1005,24 @@ void handleRemoteKey(RemoteKey key, bool isRepeat) {
         case RemoteKey::Preset: {
             if (!canChangeTime()) { showCantChange(); break; }
             cancelEntry(false);
-            const Preset& p = PRESETS[presetIndex];
-            presetIndex = (presetIndex + 1) % PRESET_COUNT;
-            applySelectedTime(p.seconds, true);
+            uint8_t index = nextFood;
+            nextFood = (nextFood + 1) % FOOD_COUNT;
+            const Food& food = FOODS[index];
+
+            activeFood = static_cast<int8_t>(index);
+            applySelectedTime(food.seconds, true, true);
+            showFoodSplash(food);
+
             char t[8];
-            formatTime(p.seconds, t, sizeof(t));
-            snprintf(noticeText[0], sizeof(noticeText[0]), "Preset: %s", p.name);
+            formatTime(food.seconds, t, sizeof(t));
+            snprintf(noticeText[0], sizeof(noticeText[0]), "Food: %s", food.name);
             snprintf(noticeText[1], sizeof(noticeText[1]), "%s  (CH = next)", t);
-            showNotice(NoticeId::PresetSet, noticeText[0], noticeText[1], "START/OK: begin", 2500);
-            tick();
+            snprintf(noticeText[2], sizeof(noticeText[2]), "Morse: %s", food.morse);
+            showNotice(NoticeId::FoodSet, noticeText[0], noticeText[1], noticeText[2], FOOD_SPLASH_MS);
+
+            beepClear();                            // beep the food's name in Morse
+            morseAppend(food.morse);
+            beepStart();
             break;
         }
 
@@ -1137,7 +1303,8 @@ void setup() {
     updateOLED(true);
 
     Serial.println(F("Digital Hourglass ready."));
-    Serial.println(F("Turn the pot to set the time. Press remote keys to see their codes here."));
+    Serial.println(F("Turn the pot to set the time. CH on the remote picks a food timer."));
+    Serial.println(F("Press remote keys to see their codes here."));
 }
 
 void loop() {
@@ -1147,6 +1314,7 @@ void loop() {
     updateTimer();
     updateShakeDetection();
     updateHealth();
+    updateSplash();
     updateBeeper();
     updateOLED();
 }
