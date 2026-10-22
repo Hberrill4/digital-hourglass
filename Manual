@@ -1,0 +1,127 @@
+Digital Hourglass – Instruction Manual
+Welcome
+
+This is a digital hourglass. Pick a time, press START, and watch the lights trickle from the top screen to the bottom one, just like sand. When the time runs out, it beeps to let you know.
+
+You can set it with the knob on the front or from across the room with the little remote. It also has six built-in food timers, from popcorn to spaghetti. Give it a shake at any time to start again.
+
+Getting to know it
+Part	What it does
+Two light panels	These are the hourglass. The top one empties and the bottom one fills as time passes.
+Small screen	Shows how much time is left and tells you what you can press next.
+Knob	Turn it to choose your time, from 10 seconds up to 10 minutes.
+START button	Press to start or pause. Hold it down for 5 seconds to reset.
+Remote control	Does everything the knob and button do, from across the room.
+Buzzer	Beeps to confirm what you did and when time is up.
+
+The screen always tells you what to do next, so if you're ever unsure, just look at the bottom three lines.
+
+Switching on
+Plug the USB-C cable into the hourglass and the other end into a computer or a USB phone charger.
+Every light on both panels comes on for a couple of seconds. This is a quick check that nothing is broken.
+The screen shows SELF TEST: PASS and you hear one short beep.
+The lights go out and the screen shows READY with a time. You're good to go.
+
+If you hear three fast chirps instead of one beep, or the screen says FAULT, something needs a look. See If something isn't working near the end.
+
+Don't hold the START button while plugging it in, or it will think the button is stuck.
+
+Setting the time
+Make sure the screen says READY (or FINISHED after a timer ends).
+Turn the knob. The time on the screen changes by 10 seconds for every little click you hear.
+Turn right for more time and left for less. The shortest is 0:10 and the longest is 10:00.
+Stop when you see the time you want. That's it, there's nothing to save.
+
+The knob only works when the timer isn't running. If you turn it mid-countdown, the screen shows ! Pot locked and nothing changes, so you can't knock it by accident.
+
+If you've just set a time with the remote, the knob waits until you turn it before taking over again. That way the time never jumps on its own.
+
+Starting, pausing and resetting
+To do this	Press this
+Start the timer	START button once
+Pause it	START button once while it's running
+Carry on after a pause	START button once again
+Start again from the beginning	Give it a shake, or hold START for 5 seconds
+Run the same time again after it finishes	START button once
+
+When you hold START to reset, the screen counts you down (Keep holding: 3s… 2s… 1s) so you know when to let go.
+
+When the time is up, the bottom panel is full, the screen says TIME'S UP! and you'll hear three long beeps. If you're using a food timer, the screen names the food instead (for example Soft egg is ready!) and the beeps are followed by the food's name in Morse code.
+
+Using the remote
+
+Point the remote at the hourglass and press a button. You don't need to be close, but nothing can be in the way.
+
+Button	What it does
+▶‖ (play/pause)	Start, pause or carry on
++ and −	Add or take away 10 seconds (hold to keep going)
+⏭ and ⏮	Add or take away 1 minute
+Number buttons	Type an exact time (see below)
+CH	Pick a food timer (see below)
+EQ	Reset
+100+	Cancel a time you're typing
+
+Typing an exact time. Press the numbers as minutes then seconds, then press ▶‖ to confirm. For example:
+
+1, 3, 0 then ▶‖ sets 1:30
+4, 5 then ▶‖ sets 0:45
+5, 0, 0 then ▶‖ sets 5:00
+
+If you stop typing for 6 seconds, it cancels and keeps the old time.
+
+Food timers. Press CH to pick a food. Each press moves on to the next one:
+
+Press	Food	Time
+1st	Soft-boiled egg (from boiling)	6:00
+2nd	Spaghetti (dried)	10:00
+3rd	Instant noodles	3:00
+4th	Microwave popcorn	2:30
+5th	Steamed broccoli	4:00
+6th	Corn on the cob (boiled)	5:00
+
+When you pick a food, three fun things happen:
+
+The buzzer spells the food's name in Morse code, so you know which one you've picked without looking. EGG is short, BROCCOLI takes about five seconds.
+The top light panel shows a little picture of the food, and the bottom one shows an hourglass.
+When you press START, the food itself becomes the sand. It disappears from the top panel bit by bit and builds back up in the bottom panel. When it's all at the bottom, your food's ready.
+
+Turning the knob or typing a time on the remote switches back to normal sand.
+
+You can only change the time from the remote when the timer isn't running. Pause it and reset it first.
+
+What the beeps mean
+You hear	It means
+A tiny click	Your knob turn or button press worked
+Two short beeps	Timer started or carrying on
+One beep	Timer paused
+One short beep while running	Another 10 seconds have gone (at 50, 40, 30, 20 and 10 seconds left)
+Three long beeps	Time's up
+Short and long beeps (Morse code)	The name of the food timer you picked, or that it's ready
+Two beeps after a shake or reset	Timer has gone back to the start
+Three fast chirps	That didn't work, or something's wrong. Read the screen
+One very long beep	The screen has come loose
+If something isn't working
+
+Most problems are a loose wire or a flat battery. Unplug the USB cable before you touch any wires.
+
+Problem	Try this
+Nothing happens at all	Check the USB cable is pushed in at both ends, and try a different charger
+The light panels stay dark	Unplug, check the wires going into the bottom panel, plug back in
+Only one light panel works	Check the short wires joining the two panels
+The screen is blank	Unplug, press its four wires in firmly, plug back in
+Turning the knob does nothing	Make sure the screen says READY. If it does, check the knob's three wires
+The time goes down when I turn right	Ask whoever built it to swap the knob's two outside wires
+The remote does nothing	Swap in a new CR2025 coin battery and point it straight at the hourglass
+Shaking doesn't reset it	The screen will say ! IMU disconnected. Check the motion sensor's wires, or hold START for 5 seconds instead
+Screen says ! START button stuck	Let go of the button. If it stays, the button's wires need checking
+No beeps	The buzzer wiring needs checking
+
+If you're still stuck, unplug it, wait 10 seconds and plug it back in. The start-up check will often tell you exactly which part isn't happy.
+
+Looking after your hourglass
+Keep it dry. No drinks nearby, and never use it outdoors in the rain.
+Shake it gently. A firm wiggle is enough to reset it; it doesn't need throwing about.
+Only power it from USB, using a computer or a normal phone charger.
+Unplug it before moving wires or putting it away.
+Keep the remote's coin battery away from young children. If one is swallowed, get medical help straight away.
+Take the battery out of the remote if you won't use it for a few months.
