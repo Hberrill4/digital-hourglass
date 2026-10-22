@@ -20,7 +20,8 @@
 // - 10k linear potentiometer on A0 (sets the time)
 // - VS1838B IR receiver on D8 + NEC IR remote (full control)
 // - START button on D5
-// - Active buzzer on D6 through an NPN transistor
+// - BRIGHTNESS button on D4 (also remote CH- / CH+)
+// - Passive buzzer on D6 (tone at BUZZER_FREQ_HZ)
 // - GY-87 IMU (MPU6050) for shake-to-reset
 // - SSD1306 128x64 I2C OLED
 //
@@ -43,7 +44,9 @@
 
 constexpr uint8_t MATRIX_CS_PIN = 10;   // DIN = D11 (MOSI), CLK = D13 (SCK)
 constexpr uint8_t START_BUTTON_PIN = 5; // button to GND
-constexpr uint8_t BUZZER_PIN = 6;       // to NPN base via 1k
+constexpr uint8_t BRIGHT_BUTTON_PIN = 4; // button to GND
+constexpr uint8_t BUZZER_PIN = 6;       // passive buzzer (directly, or via the NPN driver)
+constexpr unsigned int BUZZER_FREQ_HZ = 2300;   // passive buzzers need a tone; ~2-3 kHz is loudest
 constexpr uint8_t IR_RECEIVE_PIN = 8;   // VS1838B OUT
 constexpr uint8_t POT_PIN = A0;         // potentiometer wiper
 // I2C: SDA = A4 / SDA header, SCL = A5 / SCL header
@@ -51,8 +54,19 @@ constexpr uint8_t POT_PIN = A0;         // potentiometer wiper
 // ---------------- MATRIX ----------------
 
 constexpr uint8_t MATRIX_COUNT = 2;
-constexpr uint8_t MATRIX_BRIGHTNESS = 3;
+// Four brightness levels for the matrices (MAX7219 0-15) and the OLED contrast.
+// Level 4 stops at 12/15 to stay inside the USB power budget.
+constexpr uint8_t BRIGHTNESS_LEVELS = 4;
+const uint8_t MATRIX_INTENSITY[BRIGHTNESS_LEVELS] = {1, 3, 7, 12};
+const uint8_t OLED_CONTRAST[BRIGHTNESS_LEVELS] = {8, 60, 150, 255};
+uint8_t brightnessIndex = 1;            // start at level 2 (the old fixed setting)
 MD_MAX72XX matrix(MD_MAX72XX::FC16_HW, MATRIX_CS_PIN, MATRIX_COUNT);
+
+// Physical mounting of the two 8x8 modules (fix here if the self-test arrows don't point up):
+//   UPPER_MODULE: which module is the top chamber (0 = first in the chain, 1 = second)
+//   MODULE_ROTATION: clockwise quarter-turns applied to every picture (0-3)
+constexpr uint8_t UPPER_MODULE = 1;
+constexpr uint8_t MODULE_ROTATION = 0;
 
 // ---------------- I2C + OLED ----------------
 
@@ -110,29 +124,37 @@ constexpr uint32_t POT_SAMPLE_MS = 20;
 
 // Two common remotes are supported. Set the one you have; the Serial
 // Monitor prints the code of every key, so any remote can be mapped.
-enum class RemoteLayout : uint8_t { CarMp3_21Key, Arrows_17Key };
-constexpr RemoteLayout REMOTE_LAYOUT = RemoteLayout::CarMp3_21Key;
+enum class RemoteLayout : uint8_t { Mp3_21Key, Arrows_17Key };
+constexpr RemoteLayout REMOTE_LAYOUT = RemoteLayout::Mp3_21Key;
 
 enum class RemoteKey : uint8_t {
     None, Digit0, Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9,
-    PlayOk, Plus10, Minus10, PlusMin, MinusMin, Reset, Preset, Clear
+    PlayOk, Plus10, Minus10, PlusMin, MinusMin, Reset, Preset, Clear, BrightCycle, Mute, Restart
 };
 
 struct KeyCode { uint8_t command; RemoteKey key; };
 
-// "Car MP3" 21-key remote (CH-/CH/CH+, |<< >>| >||, -/+/EQ, 0/100+/200+, 1-9)
-const KeyCode CAR_MP3_KEYS[] = {
+// "SPECIAL FOR MP3" 21-key remote:
+//   Power  Mode   Mute
+//   >||    |<<    >>|
+//   EQ     -      +
+//   0      Repeat U/SD
+//   1-9
+const KeyCode MP3_KEYS[] = {
     {0x16, RemoteKey::Digit0}, {0x0C, RemoteKey::Digit1}, {0x18, RemoteKey::Digit2}, {0x5E, RemoteKey::Digit3},
     {0x08, RemoteKey::Digit4}, {0x1C, RemoteKey::Digit5}, {0x5A, RemoteKey::Digit6}, {0x42, RemoteKey::Digit7},
     {0x52, RemoteKey::Digit8}, {0x4A, RemoteKey::Digit9},
-    {0x43, RemoteKey::PlayOk},   // >||
-    {0x15, RemoteKey::Plus10},   // +
-    {0x07, RemoteKey::Minus10},  // -
-    {0x40, RemoteKey::PlusMin},  // >>|
-    {0x44, RemoteKey::MinusMin}, // |<<
-    {0x09, RemoteKey::Reset},    // EQ
-    {0x46, RemoteKey::Preset},   // CH
-    {0x19, RemoteKey::Clear},    // 100+
+    {0x45, RemoteKey::Reset},       // Power
+    {0x46, RemoteKey::Preset},      // Mode   -> next food timer
+    {0x47, RemoteKey::Mute},        // Mute   -> sound on/off
+    {0x44, RemoteKey::PlayOk},      // >||
+    {0x40, RemoteKey::MinusMin},    // |<<    -> -1 min
+    {0x43, RemoteKey::PlusMin},     // >>|    -> +1 min
+    {0x07, RemoteKey::BrightCycle}, // EQ     -> brightness
+    {0x15, RemoteKey::Minus10},     // -
+    {0x09, RemoteKey::Plus10},      // +
+    {0x19, RemoteKey::Restart},     // Repeat -> restart same time
+    {0x0D, RemoteKey::Clear},       // U/SD   -> cancel typing
 };
 
 // 17-key remote with arrows (1-9, *, 0, #, arrows, OK)
@@ -149,7 +171,7 @@ const KeyCode ARROW_KEYS[] = {
     {0x42, RemoteKey::Clear},    // *
 };
 
-const char* RESET_KEY_NAME = (REMOTE_LAYOUT == RemoteLayout::CarMp3_21Key) ? "EQ" : "#";
+const char* RESET_KEY_NAME = (REMOTE_LAYOUT == RemoteLayout::Mp3_21Key) ? "PWR" : "#";
 
 // ---------------- FOOD TIMERS ----------------
 // 8x8 pictures, top row first, leftmost pixel = highest bit.
@@ -161,18 +183,24 @@ struct Food {
 };
 
 const Food FOODS[] = {
+    // Egg sitting in an egg cup
     {"Soft egg",    "EGG",      360, {0b00011000, 0b00111100, 0b01111110, 0b01111110,
-                                      0b11111111, 0b11111111, 0b01111110, 0b00111100}},
-    {"Spaghetti",   "PASTA",    600, {0b00111100, 0b01000010, 0b10011001, 0b10100101,
-                                      0b10100101, 0b10011001, 0b01000010, 0b00111100}},
-    {"Noodles",     "NOODLES",  180, {0b00000110, 0b00011000, 0b01100000, 0b11111111,
-                                      0b01111110, 0b01111110, 0b00111100, 0b00111100}},
-    {"Popcorn",     "POPCORN",  150, {0b01010010, 0b10101101, 0b01111110, 0b11011011,
-                                      0b01011010, 0b01011010, 0b00111100, 0b00111100}},
-    {"Broccoli",    "BROCCOLI", 240, {0b01101100, 0b11111110, 0b11111111, 0b01111110,
-                                      0b00011000, 0b00011000, 0b00111100, 0b00000000}},
+                                      0b11111111, 0b01111110, 0b00011000, 0b00111100}},
+    // Fork with spaghetti twirled round it
+    {"Spaghetti",   "PASTA",    600, {0b01010100, 0b01010100, 0b01111100, 0b00111000,
+                                      0b01111110, 0b11011011, 0b01111110, 0b00010000}},
+    // Noodle cup with chopsticks
+    {"Noodles",     "NOODLES",  180, {0b00000011, 0b00001100, 0b00110000, 0b11111111,
+                                      0b01111110, 0b01011010, 0b01111110, 0b00111100}},
+    // Striped bucket overflowing with popcorn
+    {"Popcorn",     "POPCORN",  150, {0b01001010, 0b10110101, 0b11111111, 0b01111110,
+                                      0b01011010, 0b01011010, 0b00110100, 0b00111100}},
+    // Broccoli: bumpy floret on a branching stalk
+    {"Broccoli",    "BROCCOLI", 240, {0b01100110, 0b11111111, 0b11111111, 0b01111110,
+                                      0b00100100, 0b00011000, 0b00011000, 0b00011000}},
+    // Corn cob with rows of kernels and husk leaves
     {"Corn on cob", "CORN",     300, {0b00011000, 0b00110100, 0b00101100, 0b00110100,
-                                      0b00101100, 0b01011010, 0b10011001, 0b00011000}},
+                                      0b00101100, 0b01011010, 0b10111101, 0b00011000}},
 };
 constexpr uint8_t FOOD_COUNT = sizeof(FOODS) / sizeof(FOODS[0]);
 
@@ -198,6 +226,20 @@ constexpr float SHAKE_THRESHOLD = 7.0f;
 constexpr uint32_t SHAKE_CONFIRM_MS = 450;
 constexpr uint32_t SHAKE_COOLDOWN_MS = 1800;
 float previousAccelerationMagnitude = STANDARD_GRAVITY;
+
+// ---------------- FLIP DETECTION ----------------
+// Gravity is recorded at power-up as "upright". When it points the other
+// way for FLIP_STABLE_MS the hourglass has been turned upside down.
+constexpr float FLIP_COS_THRESHOLD = 0.82f;  // must be tilted ~145 degrees to count as a flip
+constexpr uint32_t FLIP_STABLE_MS = 700;     // and held there, still, for this long
+constexpr float FLIP_STILL_MIN = 7.5f;       // m/s^2: only near 1 g counts as 'held still'
+constexpr float FLIP_STILL_MAX = 12.0f;
+bool displayFlipped = false;
+bool flipReferenceValid = false;
+float refAx = 0, refAy = 0, refAz = 0;
+float accX = 0, accY = 0, accZ = 0;
+bool accFresh = false;
+uint32_t flipCandidateSince = 0;
 uint32_t shakeCandidateAt = 0;
 uint32_t lastShakeAt = 0;
 
@@ -212,6 +254,11 @@ uint32_t lastTimerTickMs = 0;
 uint32_t pausedRemainderMs = 0;
 uint32_t lastDisplayUpdateMs = 0;
 
+bool brightButtonDown = false;
+uint32_t lastBrightEdge = 0;
+int8_t grainRow = 0;             // falling-grain animation (standard timer)
+uint32_t lastAnimMs = 0;
+uint32_t finishedAtMs = 0;
 bool startButtonDown = false;
 bool startHoldHandled = false;
 bool startStuck = false;
@@ -246,6 +293,11 @@ uint32_t lastOledRetryMs = 0;
 // beep() plays N identical steps; morseAppend() adds a word in Morse.
 
 constexpr uint8_t BEEP_MAX_STEPS = 80;
+
+// A passive buzzer has no oscillator, so it is driven with a square wave.
+bool soundMuted = false;          // remote Mute key
+void buzzerOn()  { if (!soundMuted) tone(BUZZER_PIN, BUZZER_FREQ_HZ); }
+void buzzerOff() { noTone(BUZZER_PIN); digitalWrite(BUZZER_PIN, LOW); }
 constexpr uint16_t MORSE_DOT_MS = 60;      // ~20 words per minute
 
 struct Beeper {
@@ -267,7 +319,7 @@ const char* const MORSE_CODE[26] = {
 void stopBeeper() {
     beeper.active = false;
     beeper.sounding = false;
-    digitalWrite(BUZZER_PIN, LOW);
+    buzzerOff();
 }
 
 void beepClear() {
@@ -287,7 +339,7 @@ void beepStart() {
     beeper.index = 0;
     beeper.active = true;
     beeper.sounding = true;
-    digitalWrite(BUZZER_PIN, HIGH);
+    buzzerOn();
     beeper.nextChangeMs = millis() + beeper.onMs[0];
 }
 
@@ -320,7 +372,7 @@ void updateBeeper() {
     if (static_cast<int32_t>(millis() - beeper.nextChangeMs) < 0) return;
 
     if (beeper.sounding) {
-        digitalWrite(BUZZER_PIN, LOW);
+        buzzerOff();
         beeper.sounding = false;
         if (beeper.index + 1 >= beeper.count) {
             beeper.active = false;
@@ -329,7 +381,7 @@ void updateBeeper() {
         beeper.nextChangeMs = millis() + beeper.offMs[beeper.index];
     } else {
         beeper.index++;
-        digitalWrite(BUZZER_PIN, HIGH);
+        buzzerOn();
         beeper.sounding = true;
         beeper.nextChangeMs = millis() + beeper.onMs[beeper.index];
     }
@@ -341,7 +393,7 @@ void updateBeeper() {
 
 enum class NoticeId : uint8_t {
     None, CantChange, InvalidTime, OutOfRange, TimeSet, FoodSet, Cancelled,
-    UnknownKey, PotLocked, TimerReset, ImuConnected, ImuLost, ImuWrongChip
+    UnknownKey, PotLocked, TimerReset, ImuConnected, ImuLost, ImuWrongChip, Brightness, Sound, Flipped
 };
 
 struct Notice {
@@ -353,6 +405,9 @@ Notice notice;
 char noticeText[3][22];       // for notices with numbers or names in them
 
 void updateOLED(bool force = false);
+void drawHourglass(uint32_t secondsLeft);
+void changeBrightness(int8_t direction, bool wrap);
+void captureUprightReference();
 
 bool noticeActive(uint32_t now) {
     return notice.id != NoticeId::None && now - notice.shownAt < notice.durationMs;
@@ -411,6 +466,8 @@ bool connectOled() {
         if (oled.begin(SSD1306_SWITCHCAPVCC, address, true, false)) {
             oledAddress = address;
             oledAvailable = true;
+            oled.ssd1306_command(SSD1306_SETCONTRAST);
+            oled.ssd1306_command(OLED_CONTRAST[brightnessIndex]);
             Serial.print(F("OLED found at 0x"));
             Serial.println(address, HEX);
             return true;
@@ -455,6 +512,7 @@ void setImuStatus(ImuStatus status, bool announce) {
 
     switch (status) {
         case ImuStatus::Ok:
+            captureUprightReference();
             showNotice(NoticeId::ImuConnected, "IMU connected", "Shake reset is on", nullptr);
             beep(1, 65);
             break;
@@ -507,8 +565,21 @@ void setPixel(uint8_t row, uint16_t column, bool on) {
 }
 
 // chamber 0 = lower (columns 0-7), 1 = upper (columns 8-15); x 0 = left, y 0 = top
+// Every picture is drawn through here. Upside down = a true 180-degree turn:
+// the chambers swap and each picture is mirrored left-right and top-bottom.
 void setChamberPixel(uint8_t chamber, uint8_t x, uint8_t y, bool on) {
-    setPixel(y, chamber * 8 + (7 - x), on);
+    if (displayFlipped) {
+        chamber = 1 - chamber;
+        x = 7 - x;
+        y = 7 - y;
+    }
+    for (uint8_t turn = 0; turn < MODULE_ROTATION; turn++) {   // compensate for module mounting
+        uint8_t t = x;
+        x = 7 - y;
+        y = t;
+    }
+    uint8_t module = (chamber == 1) ? UPPER_MODULE : 1 - UPPER_MODULE;
+    setPixel(y, module * 8 + (7 - x), on);
 }
 
 bool bitmapPixel(const uint8_t bitmap[8], uint8_t x, uint8_t y) {
@@ -536,6 +607,99 @@ void drawFoodHourglass(const Food& food, uint32_t secondsLeft) {
             if (bitmapPixel(food.bitmap, x, y)) setChamberPixel(0, x, y, k++ < moved);
 }
 
+// ---- Standard timer: shaped glass, sand that drains with a dip,
+// ---- a mound that builds up, a falling grain, and a sparkle finish.
+// Rounded bulb, then a true 45-degree diagonal (one pixel per side per row) into the neck.
+//   upper          lower
+//   .######.       ...##...
+//   ########       ...##...
+//   ########       ..####..
+//   ########       .######.
+//   .######.       ########
+//   ..####..       ########
+//   ...##...       ########
+//   ...##...       .######.
+constexpr uint8_t GLASS_PIXELS = 44;
+const uint8_t UPPER_GLASS[8] = {0x7E, 0xFF, 0xFF, 0xFF, 0x7E, 0x3C, 0x18, 0x18};
+const uint8_t LOWER_GLASS[8] = {0x18, 0x18, 0x3C, 0x7E, 0xFF, 0xFF, 0xFF, 0x7E};
+const uint8_t CENTRE_OUT[8] = {3, 4, 2, 5, 1, 6, 0, 7};
+constexpr uint8_t GRAIN_X = 3;
+constexpr uint32_t ANIM_MS = 90;
+constexpr uint32_t SPARKLE_MS = 6000;
+
+uint8_t upperX[GLASS_PIXELS], upperY[GLASS_PIXELS];   // removal order: top row first, centre first
+uint8_t lowerX[GLASS_PIXELS], lowerY[GLASS_PIXELS];   // fill order: bottom row first, centre first
+uint8_t lowerIndex[8][8];                             // position in the fill order (255 = outside glass)
+
+void buildGlassOrder() {
+    uint8_t k = 0;
+    for (uint8_t y = 0; y < 8; y++)
+        for (uint8_t i = 0; i < 8; i++)
+            if (bitmapPixel(UPPER_GLASS, CENTRE_OUT[i], y)) { upperX[k] = CENTRE_OUT[i]; upperY[k] = y; k++; }
+    k = 0;
+    for (uint8_t y = 0; y < 8; y++) for (uint8_t x = 0; x < 8; x++) lowerIndex[y][x] = 255;
+    for (int8_t y = 7; y >= 0; y--)
+        for (uint8_t i = 0; i < 8; i++)
+            if (bitmapPixel(LOWER_GLASS, CENTRE_OUT[i], y)) {
+                lowerX[k] = CENTRE_OUT[i]; lowerY[k] = y; lowerIndex[y][CENTRE_OUT[i]] = k; k++;
+            }
+}
+
+uint8_t sandMovedFor(uint32_t secondsLeft) {
+    uint32_t elapsed = selectedSeconds - secondsLeft;
+    uint8_t moved = static_cast<uint8_t>((elapsed * GLASS_PIXELS) / selectedSeconds);
+    return moved & ~1;            // move grains in left/right pairs so the sand stays symmetrical
+}
+
+// Lowest empty row above the pile in the grain's column (-1 = column full).
+int8_t grainLandingRow(uint8_t moved) {
+    for (int8_t y = 7; y >= 0; y--) {
+        uint8_t idx = lowerIndex[y][GRAIN_X];
+        if (idx != 255 && idx >= moved) return y;
+    }
+    return -1;
+}
+
+void drawStandardHourglass(uint32_t secondsLeft) {
+    uint8_t moved = sandMovedFor(secondsLeft);
+    for (uint8_t k = 0; k < GLASS_PIXELS; k++) {
+        setChamberPixel(1, upperX[k], upperY[k], k >= moved);
+        setChamberPixel(0, lowerX[k], lowerY[k], k < moved);
+    }
+
+    if (timerState == TimerState::Running && moved < GLASS_PIXELS) {
+        int8_t landing = grainLandingRow(moved);
+        if (grainRow >= 0 && grainRow <= landing) setChamberPixel(0, GRAIN_X, grainRow, true);
+    }
+
+    if (timerState == TimerState::Finished && millis() - finishedAtMs < SPARKLE_MS) {
+        for (uint8_t i = 0; i < 4; i++) {
+            uint8_t k = static_cast<uint8_t>(random(GLASS_PIXELS));
+            setChamberPixel(0, lowerX[k], lowerY[k], false);       // twinkle
+        }
+    }
+}
+
+// Runs the falling grain while counting and the sparkle after finishing.
+void updateMatrixAnimation() {
+    if (activeFood >= 0 || splashActive) return;
+    bool running = timerState == TimerState::Running;
+    bool sparkling = timerState == TimerState::Finished && millis() - finishedAtMs < SPARKLE_MS;
+    bool sparkleJustEnded = timerState == TimerState::Finished && !sparkling &&
+                            millis() - finishedAtMs < SPARKLE_MS + ANIM_MS * 2;
+    if (!running && !sparkling && !sparkleJustEnded) return;
+
+    uint32_t now = millis();
+    if (now - lastAnimMs < ANIM_MS) return;
+    lastAnimMs = now;
+
+    if (running) {
+        int8_t landing = grainLandingRow(sandMovedFor(remainingSeconds));
+        grainRow = (landing < 0 || grainRow >= landing) ? 0 : grainRow + 1;
+    }
+    drawHourglass(running ? remainingSeconds : 0);
+}
+
 void drawHourglass(uint32_t secondsLeft) {
     if (splashActive) return;                             // splash stays up until it ends
     matrix.clear();
@@ -547,18 +711,7 @@ void drawHourglass(uint32_t secondsLeft) {
         return;
     }
 
-    uint32_t elapsed = selectedSeconds - secondsLeft;
-    uint8_t sandMoved = static_cast<uint8_t>((elapsed * 64UL) / selectedSeconds);
-    uint8_t topSand = 64 - sandMoved;
-    uint8_t bottomSand = sandMoved;
-
-    for (uint8_t row = 0; row < 8; row++) {
-        for (uint8_t col = 0; col < 8; col++) {
-            uint8_t rank = (7 - row) * 8 + col;            // 0 = bottom-left
-            setPixel(row, col + 8, rank < topSand);        // upper chamber
-            setPixel(row, col, rank < bottomSand);         // lower chamber
-        }
-    }
+    drawStandardHourglass(secondsLeft);
     matrix.update();
 }
 
@@ -708,6 +861,24 @@ void updateOLED(bool force) {
     }
 
     oled.setTextColor(SSD1306_WHITE);
+
+    // Food timer finished: big "TIME TO EAT!" instead of 00:00
+    if (timerState == TimerState::Finished && activeFood >= 0 && !entryActive &&
+        !startStuck && !noticeActive(now)) {
+        oled.setTextSize(2);
+        oled.setCursor(22, 13);
+        oled.print(F("TIME TO"));
+        oled.setCursor(40, 31);
+        oled.print(F("EAT!"));
+        oled.setTextSize(1);
+        char line[22];
+        if ((now / 2000) % 2 == 0) snprintf(line, sizeof(line), "%s is ready", FOODS[activeFood].name);
+        else snprintf(line, sizeof(line), "START/OK: run again");
+        printLine(2, line);
+        oled.display();
+        return;
+    }
+
     oled.setTextSize(3);
     oled.setCursor(19, 12);
     oled.print(timeText);
@@ -722,7 +893,7 @@ void updateOLED(bool force) {
     } else if (entryActive) {
         printLine(0, "OK: set this time");
         printLine(1, "Keep typing digits");
-        printLine(2, REMOTE_LAYOUT == RemoteLayout::CarMp3_21Key ? "100+: cancel" : "*: cancel");
+        printLine(2, REMOTE_LAYOUT == RemoteLayout::Mp3_21Key ? "U/SD: cancel" : "*: cancel");
     } else {
         printInstructions(now);
     }
@@ -782,6 +953,7 @@ void resumeTimer() {
 
 void finishTimer() {
     timerState = TimerState::Finished;
+    finishedAtMs = millis();
     remainingSeconds = 0;
     lockPot();
     drawHourglass(0);
@@ -896,9 +1068,27 @@ void updatePot() {
 // IR REMOTE
 // ============================================================
 
+const char* keyName(RemoteKey key) {
+    switch (key) {
+        case RemoteKey::PlayOk:      return "START/PAUSE/OK";
+        case RemoteKey::Plus10:      return "+10 s";
+        case RemoteKey::Minus10:     return "-10 s";
+        case RemoteKey::PlusMin:     return "+1 min";
+        case RemoteKey::MinusMin:    return "-1 min";
+        case RemoteKey::Reset:       return "RESET";
+        case RemoteKey::Restart:     return "RESTART";
+        case RemoteKey::Preset:      return "NEXT FOOD";
+        case RemoteKey::Clear:       return "CANCEL TYPING";
+        case RemoteKey::BrightCycle: return "BRIGHTNESS";
+        case RemoteKey::Mute:        return "MUTE";
+        case RemoteKey::None:        return "(not mapped)";
+        default:                     return "DIGIT";
+    }
+}
+
 RemoteKey lookupKey(uint8_t command) {
-    if (REMOTE_LAYOUT == RemoteLayout::CarMp3_21Key) {
-        for (const KeyCode& k : CAR_MP3_KEYS) if (k.command == command) return k.key;
+    if (REMOTE_LAYOUT == RemoteLayout::Mp3_21Key) {
+        for (const KeyCode& k : MP3_KEYS) if (k.command == command) return k.key;
     } else {
         for (const KeyCode& k : ARROW_KEYS) if (k.command == command) return k.key;
     }
@@ -1016,7 +1206,7 @@ void handleRemoteKey(RemoteKey key, bool isRepeat) {
             char t[8];
             formatTime(food.seconds, t, sizeof(t));
             snprintf(noticeText[0], sizeof(noticeText[0]), "Food: %s", food.name);
-            snprintf(noticeText[1], sizeof(noticeText[1]), "%s  (CH = next)", t);
+            snprintf(noticeText[1], sizeof(noticeText[1]), "%s  (MODE = next)", t);
             snprintf(noticeText[2], sizeof(noticeText[2]), "Morse: %s", food.morse);
             showNotice(NoticeId::FoodSet, noticeText[0], noticeText[1], noticeText[2], FOOD_SPLASH_MS);
 
@@ -1025,6 +1215,28 @@ void handleRemoteKey(RemoteKey key, bool isRepeat) {
             beepStart();
             break;
         }
+
+        case RemoteKey::BrightCycle:
+            changeBrightness(+1, true);
+            break;
+
+        case RemoteKey::Mute:
+            soundMuted = !soundMuted;
+            if (soundMuted) {
+                stopBeeper();
+                showNotice(NoticeId::Sound, "Sound off", "Mute again: sound on", nullptr, 1500);
+            } else {
+                showNotice(NoticeId::Sound, "Sound on", nullptr, nullptr, 1500);
+                tick();
+            }
+            break;
+
+        case RemoteKey::Restart:
+            cancelEntry(false);
+            resetTimer(false);
+            startTimer();
+            showNotice(NoticeId::TimerReset, "Restarted", "Same time again", nullptr, 1500);
+            break;
 
         case RemoteKey::Reset: {
             cancelEntry(false);
@@ -1060,7 +1272,8 @@ void updateIr() {
             Serial.print(data.address, HEX);
             Serial.print(F("  command 0x"));
             Serial.print(command, HEX);
-            Serial.println(key == RemoteKey::None ? F("  (not mapped)") : F(""));
+            Serial.print(F("  -> "));
+            Serial.println(keyName(key));
         }
 
         if (key == RemoteKey::None) {
@@ -1078,6 +1291,42 @@ void updateIr() {
     }
     // Other protocols / noise are ignored silently.
     IrReceiver.resume();
+}
+
+// ============================================================
+// BRIGHTNESS (D4 button, remote CH- / CH+)
+// ============================================================
+
+void changeBrightness(int8_t direction, bool wrap) {
+    int8_t i = static_cast<int8_t>(brightnessIndex) + direction;
+    if (i >= BRIGHTNESS_LEVELS) i = wrap ? 0 : BRIGHTNESS_LEVELS - 1;
+    if (i < 0) i = 0;
+    brightnessIndex = static_cast<uint8_t>(i);
+
+    matrix.control(MD_MAX72XX::INTENSITY, MATRIX_INTENSITY[brightnessIndex]);
+    if (oledAvailable) {
+        oled.ssd1306_command(SSD1306_SETCONTRAST);
+        oled.ssd1306_command(OLED_CONTRAST[brightnessIndex]);
+    }
+
+    snprintf(noticeText[0], sizeof(noticeText[0]), "Brightness %u of %u",
+             brightnessIndex + 1, BRIGHTNESS_LEVELS);
+    char bar[17];
+    for (uint8_t b = 0; b < 16; b++) bar[b] = (b < (brightnessIndex + 1) * 4) ? '#' : '.';
+    bar[16] = '\0';
+    snprintf(noticeText[1], sizeof(noticeText[1]), "[%s]", bar);
+    showNotice(NoticeId::Brightness, noticeText[0], noticeText[1], "D4 button or EQ", 1500);
+    tick();
+}
+
+void updateBrightButton() {
+    uint32_t now = millis();
+    bool pressed = digitalRead(BRIGHT_BUTTON_PIN) == LOW;
+    if (pressed != brightButtonDown && now - lastBrightEdge >= DEBOUNCE_MS) {
+        lastBrightEdge = now;
+        brightButtonDown = pressed;
+        if (pressed) changeBrightness(+1, true);        // each press steps up, then wraps to 1
+    }
 }
 
 // ============================================================
@@ -1154,6 +1403,8 @@ bool readAccelerationMagnitude(float& magnitude) {
     float ay = raw[1] / IMU_COUNTS_PER_G * STANDARD_GRAVITY;
     float az = raw[2] / IMU_COUNTS_PER_G * STANDARD_GRAVITY;
     magnitude = sqrtf(ax * ax + ay * ay + az * az);
+    accX = ax; accY = ay; accZ = az;
+    accFresh = true;
     return true;
 }
 
@@ -1196,6 +1447,90 @@ void updateShakeDetection() {
 }
 
 // ============================================================
+// FLIP (turn the hourglass upside down)
+// ============================================================
+
+void captureUprightReference() {
+    flipReferenceValid = false;
+    if (!imuAvailable) return;
+    float sx = 0, sy = 0, sz = 0, m;
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < 10; i++) {
+        if (readAccelerationMagnitude(m)) { sx += accX; sy += accY; sz += accZ; n++; }
+        delay(5);
+    }
+    if (n < 5) return;
+    refAx = sx / n; refAy = sy / n; refAz = sz / n;
+    float g = sqrtf(refAx * refAx + refAy * refAy + refAz * refAz);
+    flipReferenceValid = g > 5.0f && g < 15.0f;          // roughly 1 g, i.e. sitting still
+    resetShakeState();
+}
+
+void handleFlip(bool nowFlipped) {
+    displayFlipped = nowFlipped;
+    lastShakeAt = millis();                               // a flip is not a shake
+    shakeCandidateAt = 0;
+    if (oledAvailable) oled.setRotation(nowFlipped ? 2 : 0);
+    cancelEntry(false);
+    endSplash();
+    Serial.println(nowFlipped ? F("[FLIP] upside down") : F("[FLIP] upright"));
+
+    switch (timerState) {
+        case TimerState::Ready:
+        case TimerState::Finished:                        // idle: only turn the picture round
+            showNotice(NoticeId::Flipped, "Flipped", "Display turned over", nullptr, 1500);
+            break;
+
+        case TimerState::Running:
+        case TimerState::Paused: {                        // fallen sand is now on top
+            uint32_t newRemaining = selectedSeconds - remainingSeconds;
+            if (newRemaining == 0) {                      // flipped straight after starting: start again
+                startTimer();
+                showNotice(NoticeId::Flipped, "Flipped!", "Timer restarted", nullptr, 1500);
+                break;
+            }
+            remainingSeconds = newRemaining;
+            lastTimerTickMs = millis();
+            pausedRemainderMs = 0;
+            char t[8];
+            formatTime(remainingSeconds, t, sizeof(t));
+            snprintf(noticeText[0], sizeof(noticeText[0]), "%s left", t);
+            showNotice(NoticeId::Flipped, "Flipped! Sand swapped", noticeText[0], nullptr, 1500);
+            beep(2, 40, 60);
+            break;
+        }
+    }
+    drawHourglass(timerState == TimerState::Finished ? 0 : remainingSeconds);
+    updateOLED(true);
+}
+
+void updateFlip() {
+    if (!imuAvailable || !flipReferenceValid || !accFresh) return;
+    accFresh = false;
+
+    float magnitude = sqrtf(accX * accX + accY * accY + accZ * accZ);
+    if (magnitude < FLIP_STILL_MIN || magnitude > FLIP_STILL_MAX) {   // being moved: not a flip
+        flipCandidateSince = 0;
+        return;
+    }
+    float dot = accX * refAx + accY * refAy + accZ * refAz;
+    float norm = magnitude * sqrtf(refAx * refAx + refAy * refAy + refAz * refAz);
+    if (norm < 1.0f) return;
+    float cosine = dot / norm;                            // +1 upright, -1 upside down
+
+    bool want = displayFlipped;
+    if (cosine < -FLIP_COS_THRESHOLD) want = true;
+    else if (cosine > FLIP_COS_THRESHOLD) want = false;   // in between: keep current (hysteresis)
+
+    uint32_t now = millis();
+    if (want == displayFlipped) { flipCandidateSince = 0; return; }
+    if (flipCandidateSince == 0) { flipCandidateSince = now; return; }
+    if (now - flipCandidateSince < FLIP_STABLE_MS) return;
+    flipCandidateSince = 0;
+    handleFlip(want);
+}
+
+// ============================================================
 // SELF-TEST
 // ============================================================
 
@@ -1215,7 +1550,7 @@ void runSelfTest() {
     Serial.print(F("START: ")); Serial.println(startStuck ? F("HELD AT POWER-UP (release it, or check D5)") : F("OK"));
     Serial.print(F("POT:   ")); Serial.print(t); Serial.print(F("  (raw ")); Serial.print(static_cast<int>(potFiltered)); Serial.println(F(")"));
     Serial.print(F("IR:    receiver on D8, layout "));
-    Serial.println(REMOTE_LAYOUT == RemoteLayout::CarMp3_21Key ? F("21-key Car MP3") : F("17-key arrows"));
+    Serial.println(REMOTE_LAYOUT == RemoteLayout::Mp3_21Key ? F("21-key SPECIAL FOR MP3") : F("17-key arrows"));
     Serial.println(F("MATRIX: all 128 LEDs should be lit now."));
     Serial.println(F("-------------------"));
 
@@ -1253,6 +1588,19 @@ void runSelfTest() {
     uint32_t start = millis();
     while (millis() - start < holdMs) updateBeeper();
     stopBeeper();
+
+    // Orientation check: an arrow in each chamber, both should point UP.
+    const uint8_t ARROW_UP[8] = {0x18, 0x3C, 0x7E, 0xDB, 0x18, 0x18, 0x18, 0x18};
+    matrix.clear();
+    for (uint8_t y = 0; y < 8; y++)
+        for (uint8_t x = 0; x < 8; x++) {
+            setChamberPixel(1, x, y, bitmapPixel(ARROW_UP, x, y));
+            setChamberPixel(0, x, y, bitmapPixel(ARROW_UP, x, y));
+        }
+    matrix.update();
+    Serial.println(F("ORIENTATION: both arrows should point UP. If not, change UPPER_MODULE / MODULE_ROTATION."));
+    start = millis();
+    while (millis() - start < 1500) updateBeeper();
 }
 
 // ============================================================
@@ -1261,6 +1609,7 @@ void runSelfTest() {
 
 void setup() {
     pinMode(START_BUTTON_PIN, INPUT_PULLUP);
+    pinMode(BRIGHT_BUTTON_PIN, INPUT_PULLUP);
     pinMode(BUZZER_PIN, OUTPUT);
     digitalWrite(BUZZER_PIN, LOW);
     analogReadResolution(12);
@@ -1271,13 +1620,17 @@ void setup() {
 
     matrix.begin();
     matrix.control(MD_MAX72XX::UPDATE, MD_MAX72XX::OFF);
-    matrix.control(MD_MAX72XX::INTENSITY, MATRIX_BRIGHTNESS);
+    matrix.control(MD_MAX72XX::INTENSITY, MATRIX_INTENSITY[brightnessIndex]);
     matrix.clear();
     matrix.update();
 
     if (!connectOled()) Serial.println(F("OLED not found. Messages go to Serial only."));
     setImuStatus(connectImu(), false);
     initPot();
+    captureUprightReference();      // stand the hourglass upright when powering on
+    buildGlassOrder();
+    randomSeed(analogRead(A1));
+    brightButtonDown = digitalRead(BRIGHT_BUTTON_PIN) == LOW;   // ignore a press held at power-up
 
     if (digitalRead(START_BUTTON_PIN) == LOW) {       // held or shorted at power-up
         uint32_t now = millis();
@@ -1303,18 +1656,21 @@ void setup() {
     updateOLED(true);
 
     Serial.println(F("Digital Hourglass ready."));
-    Serial.println(F("Turn the pot to set the time. CH on the remote picks a food timer."));
+    Serial.println(F("Turn the pot to set the time. Mode on the remote picks a food timer."));
     Serial.println(F("Press remote keys to see their codes here."));
 }
 
 void loop() {
     updateStartButton();
+    updateBrightButton();
     updatePot();
     updateIr();
     updateTimer();
     updateShakeDetection();
+    updateFlip();
     updateHealth();
     updateSplash();
+    updateMatrixAnimation();
     updateBeeper();
     updateOLED();
 }
