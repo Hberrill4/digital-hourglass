@@ -613,24 +613,30 @@ void drawFoodHourglass(const Food& food, uint32_t secondsLeft) {
 
 // ---- Standard timer: sand that drains with a dip, a mound that builds up,
 // ---- a falling grain, and a sparkle finish.
-// Sand falls along the matrix rows: it fills from the bottom row (y = 7)
-// upwards, middle of each row first. With the matrices mounted as diamonds
-// this makes the sand run at 45 degrees. All 64 LEDs of each matrix hold sand.
+// Sand falls at 45 degrees: "down" is the diagonal towards the corner cell (7,7).
+// It fills by distance from that corner, so the sand surface is a diagonal line,
+// and the middle of each diagonal fills first, giving a mound.
+// All 64 LEDs of each matrix hold sand.
 constexpr uint8_t GLASS_PIXELS = 64;
 constexpr uint32_t ANIM_MS = 80;
 constexpr uint32_t SPARKLE_MS = 6000;
-constexpr uint8_t GRAIN_X = 3;                      // column the falling grain drops down
 
-uint8_t sandX[GLASS_PIXELS], sandY[GLASS_PIXELS];   // fill order from the bottom row
+uint8_t sandX[GLASS_PIXELS], sandY[GLASS_PIXELS];   // fill order from the corner
 uint8_t sandIndex[8][8];                            // position of each cell in that order
 
 void buildGlassOrder() {
-    const uint8_t CENTRE_OUT[8] = {3, 4, 2, 5, 1, 6, 0, 7};
     uint8_t k = 0;
-    for (int8_t y = 7; y >= 0; y--) {                            // bottom row first
-        for (uint8_t i = 0; i < 8; i++) {                        // middle of the row first
-            uint8_t x = CENTRE_OUT[i];
-            sandX[k] = x; sandY[k] = static_cast<uint8_t>(y); sandIndex[y][x] = k; k++;
+    for (uint8_t level = 0; level <= 14; level++) {              // distance from the corner
+        for (uint8_t offset = 0; offset <= 7; offset++) {        // middle of the diagonal first
+            for (int8_t side = 1; side >= -1; side -= 2) {
+                int a2 = level + side * offset;                  // cells (7-a, 7-b) with a+b = level
+                if (a2 % 2 != 0 || a2 < 0) continue;
+                int a = a2 / 2, b = level - a;
+                if (a > 7 || b > 7 || b < 0) continue;
+                uint8_t x = static_cast<uint8_t>(7 - a), y = static_cast<uint8_t>(7 - b);
+                sandX[k] = x; sandY[k] = y; sandIndex[y][x] = k; k++;
+                if (offset == 0) break;                          // the centre cell exists once
+            }
         }
     }
 }
@@ -640,25 +646,25 @@ uint8_t sandMovedFor(uint32_t secondsLeft) {
     return static_cast<uint8_t>((elapsed * GLASS_PIXELS) / selectedSeconds);
 }
 
-// The grain falls from the top row (y = 0) of the lower chamber straight down
-// column GRAIN_X. Returns the last empty row above the pile (-1 = full).
+// The grain falls from the opposite corner (0,0) of the lower chamber along the
+// 45-degree diagonal. Returns the last empty step above the pile (-1 = full).
 int8_t grainLandingStep(uint8_t moved) {
-    for (int8_t row = 7; row >= 0; row--)
-        if (sandIndex[row][GRAIN_X] >= moved) return row;
+    for (int8_t step = 7; step >= 0; step--)
+        if (sandIndex[step][step] >= moved) return step;
     return -1;
 }
 
 void drawStandardHourglass(uint32_t secondsLeft) {
     uint8_t moved = sandMovedFor(secondsLeft);
     for (uint8_t k = 0; k < GLASS_PIXELS; k++) {
-        setChamberPixel(1, sandX[k], sandY[k], k < GLASS_PIXELS - moved);   // upper: rests on its bottom row
-        setChamberPixel(0, sandX[k], sandY[k], k < moved);                  // lower: piles up from its bottom row
+        setChamberPixel(1, sandX[k], sandY[k], k < GLASS_PIXELS - moved);   // upper: rests in its corner
+        setChamberPixel(0, sandX[k], sandY[k], k < moved);                  // lower: piles up from its corner
     }
 
     if (timerState == TimerState::Running && moved < GLASS_PIXELS) {
         int8_t landing = grainLandingStep(moved);
         if (landing >= 0 && grainRow >= 0 && grainRow <= landing)
-            setChamberPixel(0, GRAIN_X, grainRow, true);
+            setChamberPixel(0, grainRow, grainRow, true);
     }
 
     if (timerState == TimerState::Finished && millis() - finishedAtMs < SPARKLE_MS) {
