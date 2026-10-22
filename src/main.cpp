@@ -63,10 +63,13 @@ uint8_t brightnessIndex = 1;            // start at level 2 (the old fixed setti
 MD_MAX72XX matrix(MD_MAX72XX::FC16_HW, MATRIX_CS_PIN, MATRIX_COUNT);
 
 // Physical mounting of the two 8x8 modules (fix here if the self-test arrows don't point up):
-//   UPPER_MODULE: which module is the top chamber (0 = first in the chain, 1 = second)
-//   MODULE_ROTATION: clockwise quarter-turns applied to every picture (0-3)
+//   The matrices are mounted as diamonds (45 degrees), corners meeting at the neck.
+//   UPPER_MODULE: which module is the top diamond (0 = first in the chain, 1 = second)
+//   UPPER_ROTATION / LOWER_ROTATION: clockwise quarter-turns (0-3) for each module, chosen
+//   so the self-test triangle sits in the BOTTOM corner of each diamond.
 constexpr uint8_t UPPER_MODULE = 1;
-constexpr uint8_t MODULE_ROTATION = 0;
+constexpr uint8_t UPPER_ROTATION = 0;
+constexpr uint8_t LOWER_ROTATION = 0;
 
 // ---------------- I2C + OLED ----------------
 
@@ -573,7 +576,8 @@ void setChamberPixel(uint8_t chamber, uint8_t x, uint8_t y, bool on) {
         x = 7 - x;
         y = 7 - y;
     }
-    for (uint8_t turn = 0; turn < MODULE_ROTATION; turn++) {   // compensate for module mounting
+    uint8_t turns = (chamber == 1) ? UPPER_ROTATION : LOWER_ROTATION;
+    for (uint8_t turn = 0; turn < turns; turn++) {             // compensate for module mounting
         uint8_t t = x;
         x = 7 - y;
         y = t;
@@ -609,73 +613,66 @@ void drawFoodHourglass(const Food& food, uint32_t secondsLeft) {
 
 // ---- Standard timer: shaped glass, sand that drains with a dip,
 // ---- a mound that builds up, a falling grain, and a sparkle finish.
-// Rounded bulb, then a true 45-degree diagonal (one pixel per side per row) into the neck.
-//   upper          lower
-//   .######.       ...##...
-//   ########       ...##...
-//   ########       ..####..
-//   ########       .######.
-//   .######.       ########
-//   ..####..       ########
-//   ...##...       ########
-//   ...##...       .######.
-constexpr uint8_t GLASS_PIXELS = 44;
-const uint8_t UPPER_GLASS[8] = {0x7E, 0xFF, 0xFF, 0xFF, 0x7E, 0x3C, 0x18, 0x18};
-const uint8_t LOWER_GLASS[8] = {0x18, 0x18, 0x3C, 0x7E, 0xFF, 0xFF, 0xFF, 0x7E};
-const uint8_t CENTRE_OUT[8] = {3, 4, 2, 5, 1, 6, 0, 7};
-constexpr uint8_t GRAIN_X = 3;
-constexpr uint32_t ANIM_MS = 90;
+// Diamond hourglass: each matrix is mounted at 45 degrees, so "down" is the
+// diagonal towards its bottom corner, logical cell (7,7). Sand fills by distance
+// from that corner, so its surface is always a level diagonal line; within each
+// level the middle fills first, giving a mound. The two bottom/top corners meet
+// at the neck. All 64 LEDs of each matrix hold sand.
+constexpr uint8_t GLASS_PIXELS = 64;
+constexpr uint32_t ANIM_MS = 80;
 constexpr uint32_t SPARKLE_MS = 6000;
 
-uint8_t upperX[GLASS_PIXELS], upperY[GLASS_PIXELS];   // removal order: top row first, centre first
-uint8_t lowerX[GLASS_PIXELS], lowerY[GLASS_PIXELS];   // fill order: bottom row first, centre first
-uint8_t lowerIndex[8][8];                             // position in the fill order (255 = outside glass)
+uint8_t sandX[GLASS_PIXELS], sandY[GLASS_PIXELS];   // fill order from the bottom corner
+uint8_t sandIndex[8][8];                            // position of each cell in that order
 
 void buildGlassOrder() {
     uint8_t k = 0;
-    for (uint8_t y = 0; y < 8; y++)
-        for (uint8_t i = 0; i < 8; i++)
-            if (bitmapPixel(UPPER_GLASS, CENTRE_OUT[i], y)) { upperX[k] = CENTRE_OUT[i]; upperY[k] = y; k++; }
-    k = 0;
-    for (uint8_t y = 0; y < 8; y++) for (uint8_t x = 0; x < 8; x++) lowerIndex[y][x] = 255;
-    for (int8_t y = 7; y >= 0; y--)
-        for (uint8_t i = 0; i < 8; i++)
-            if (bitmapPixel(LOWER_GLASS, CENTRE_OUT[i], y)) {
-                lowerX[k] = CENTRE_OUT[i]; lowerY[k] = y; lowerIndex[y][CENTRE_OUT[i]] = k; k++;
+    for (uint8_t level = 0; level <= 14; level++) {              // distance from the bottom corner
+        for (uint8_t offset = 0; offset <= 7; offset++) {        // middle of the level first
+            for (int8_t side = 1; side >= -1; side -= 2) {
+                // cells on this level: (7-a, 7-b) with a+b = level; centre is a == b
+                int a2 = level + side * offset;                  // a - b = side*offset  ->  a = (level + side*offset)/2
+                if (a2 % 2 != 0 || a2 < 0) continue;
+                int a = a2 / 2, b = level - a;
+                if (a > 7 || b > 7 || b < 0) continue;
+                uint8_t x = static_cast<uint8_t>(7 - a), y = static_cast<uint8_t>(7 - b);
+                sandX[k] = x; sandY[k] = y; sandIndex[y][x] = k; k++;
+                if (offset == 0) break;                          // the centre cell exists once
             }
+        }
+    }
 }
 
 uint8_t sandMovedFor(uint32_t secondsLeft) {
     uint32_t elapsed = selectedSeconds - secondsLeft;
-    uint8_t moved = static_cast<uint8_t>((elapsed * GLASS_PIXELS) / selectedSeconds);
-    return moved & ~1;            // move grains in left/right pairs so the sand stays symmetrical
+    return static_cast<uint8_t>((elapsed * GLASS_PIXELS) / selectedSeconds);
 }
 
-// Lowest empty row above the pile in the grain's column (-1 = column full).
-int8_t grainLandingRow(uint8_t moved) {
-    for (int8_t y = 7; y >= 0; y--) {
-        uint8_t idx = lowerIndex[y][GRAIN_X];
-        if (idx != 255 && idx >= moved) return y;
-    }
+// The grain falls from the neck corner (0,0) of the lower diamond straight down
+// its centre diagonal. Returns the last empty step above the pile (-1 = full).
+int8_t grainLandingStep(uint8_t moved) {
+    for (int8_t step = 7; step >= 0; step--)
+        if (sandIndex[step][step] >= moved) return step;
     return -1;
 }
 
 void drawStandardHourglass(uint32_t secondsLeft) {
     uint8_t moved = sandMovedFor(secondsLeft);
     for (uint8_t k = 0; k < GLASS_PIXELS; k++) {
-        setChamberPixel(1, upperX[k], upperY[k], k >= moved);
-        setChamberPixel(0, lowerX[k], lowerY[k], k < moved);
+        setChamberPixel(1, sandX[k], sandY[k], k < GLASS_PIXELS - moved);   // upper: rests in its bottom corner
+        setChamberPixel(0, sandX[k], sandY[k], k < moved);                  // lower: piles up from its bottom corner
     }
 
     if (timerState == TimerState::Running && moved < GLASS_PIXELS) {
-        int8_t landing = grainLandingRow(moved);
-        if (grainRow >= 0 && grainRow <= landing) setChamberPixel(0, GRAIN_X, grainRow, true);
+        int8_t landing = grainLandingStep(moved);
+        if (landing >= 0 && grainRow >= 0 && grainRow <= landing)
+            setChamberPixel(0, grainRow, grainRow, true);
     }
 
     if (timerState == TimerState::Finished && millis() - finishedAtMs < SPARKLE_MS) {
-        for (uint8_t i = 0; i < 4; i++) {
+        for (uint8_t i = 0; i < 5; i++) {
             uint8_t k = static_cast<uint8_t>(random(GLASS_PIXELS));
-            setChamberPixel(0, lowerX[k], lowerY[k], false);       // twinkle
+            setChamberPixel(0, sandX[k], sandY[k], false);              // twinkle
         }
     }
 }
@@ -694,7 +691,7 @@ void updateMatrixAnimation() {
     lastAnimMs = now;
 
     if (running) {
-        int8_t landing = grainLandingRow(sandMovedFor(remainingSeconds));
+        int8_t landing = grainLandingStep(sandMovedFor(remainingSeconds));
         grainRow = (landing < 0 || grainRow >= landing) ? 0 : grainRow + 1;
     }
     drawHourglass(running ? remainingSeconds : 0);
@@ -1589,16 +1586,17 @@ void runSelfTest() {
     while (millis() - start < holdMs) updateBeeper();
     stopBeeper();
 
-    // Orientation check: an arrow in each chamber, both should point UP.
-    const uint8_t ARROW_UP[8] = {0x18, 0x3C, 0x7E, 0xDB, 0x18, 0x18, 0x18, 0x18};
+    // Orientation check: a small triangle of sand in the bottom corner of each diamond.
     matrix.clear();
     for (uint8_t y = 0; y < 8; y++)
         for (uint8_t x = 0; x < 8; x++) {
-            setChamberPixel(1, x, y, bitmapPixel(ARROW_UP, x, y));
-            setChamberPixel(0, x, y, bitmapPixel(ARROW_UP, x, y));
+            bool corner = (7 - x) + (7 - y) <= 2;
+            setChamberPixel(1, x, y, corner);
+            setChamberPixel(0, x, y, corner);
         }
     matrix.update();
-    Serial.println(F("ORIENTATION: both arrows should point UP. If not, change UPPER_MODULE / MODULE_ROTATION."));
+    Serial.println(F("ORIENTATION: each diamond should show a small triangle in its BOTTOM corner."));
+    Serial.println(F("If not, change UPPER_ROTATION / LOWER_ROTATION (0-3) or UPPER_MODULE."));
     start = millis();
     while (millis() - start < 1500) updateBeeper();
 }
